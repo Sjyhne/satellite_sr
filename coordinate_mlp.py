@@ -4,6 +4,8 @@ import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
 
+torch.manual_seed(0)
+
 # Fourier feature mapping
 def input_mapping(x, B):
     if B is None:
@@ -57,10 +59,6 @@ def train_model(network_size, learning_rate, iters, B, train_data, test_data):
     for i in tqdm(range(iters), desc='train iter', leave=False):
         model.train()
         optimizer.zero_grad()
-        print(train_x)
-        print(train_x.shape)
-        print(train_y.shape)
-        exit("")
         outputs = model(train_x)
         loss = criterion(outputs, train_y)
         loss.backward()

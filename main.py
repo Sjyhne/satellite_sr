@@ -9,7 +9,7 @@ torch.manual_seed(0)
 from coordinate_mlp import train_model
 
 
-img = cv2.imread("images/hr.png")
+img = cv2.imread("images/hr_2.JPG")
 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 img = img / 255.
 
@@ -30,21 +30,19 @@ train_data = [x_test[::2, ::2], img[::2, ::2]]
 
 network_size = (4, 256)
 learning_rate = 1e-4
-iters = 2000
+iters = 6000
 
 mapping_size = 256
 
 B_dict = {}
 
-B_dict["none"] = None
-
-B_dict["basic"] = np.eye(2)
-
 B_gauss = torch.normal(mean=0.0, std=1.0, size=(mapping_size, 2))
 
-for scale in [1., 10., 100.]:
-    B_dict[f"gauss_{scale}"] = B_gauss * scale
+print(B_gauss.min(), B_gauss.max())
+exit("")
 
+for scale in [10., 100.]:
+    B_dict[f"gauss_{scale}"] = B_gauss * scale
 
 
 outputs = {}
@@ -63,7 +61,7 @@ for i, k in enumerate(outputs):
 plt.subplot(1, N+1, N+1)
 plt.imshow(img)
 plt.title('GT')
-plt.show()
+plt.savefig("fourier_features.png")
 
 # Plot train/test error curves
 
@@ -85,4 +83,4 @@ plt.ylabel('PSNR')
 plt.xlabel('Training iter')
 plt.legend()
 
-plt.show()
+plt.savefig("fourier_features_error.png")
