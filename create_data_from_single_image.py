@@ -20,9 +20,13 @@ def generate_random_translations(num_samples, max_pixels_x, max_pixels_y=None):
         max_pixels_y = max_pixels_x
         
     translations = []
-    for _ in range(num_samples):
-        dx = random.uniform(-max_pixels_x, max_pixels_x)
-        dy = random.uniform(-max_pixels_y, max_pixels_y)
+    for i in range(num_samples):
+        if i == 0:  # First sample should be unshifted
+            dx = 0.0
+            dy = 0.0
+        else:
+            dx = random.uniform(-max_pixels_x, max_pixels_x)
+            dy = random.uniform(-max_pixels_y, max_pixels_y)
         translations.append((dx, dy))
     return translations
 
@@ -44,7 +48,7 @@ if __name__ == "__main__":
     downsampling_factors = [1, 2, 4, 8]  # Will create patches of size 256, 128, and 64
     
     # Translation settings (in HR space)
-    max_hr_translation = 8  # Maximum pixels to translate in HR space
+    max_hr_translation = 4  # Maximum pixels to translate in HR space
     num_samples = 16
     
     # Cropping settings
@@ -118,8 +122,8 @@ if __name__ == "__main__":
             # Apply shift to full image
             shifted_full = apply_shift_torch(
                 original_img,
-                dx=dx,
-                dy=dy
+                dx=torch.tensor([dx], device=device),  # Wrap in tensor
+                dy=torch.tensor([dy], device=device)   # Wrap in tensor
             )
             
             # Extract our patch from the center of the shifted image

@@ -17,9 +17,61 @@ from losses import BasicLosses
 import argparse
 
 
-def train_one_epoch(model, recon_optimizer, trans_optimizer, train_loader, hr_coords, device, iteration=0):
+def visualize_masked_images(output, target, mask, iteration, save_dir='./mask_vis'):
+    """Visualize the masked output and target images."""
+    # Create absolute path
+    save_dir = Path(save_dir).absolute()
+    save_dir.mkdir(exist_ok=True, parents=True)  # Add parents=True to create all necessary directories
+    
+    print(f"Saving masked images to: {save_dir}")  # Debug print
+    
+    # Convert tensors to numpy arrays
+    output = output.detach().cpu().numpy()
+    target = target.detach().cpu().numpy()
+    mask = mask.detach().cpu().numpy()
+    
+    # Create figure with subplots for each sample in batch
+    B = output.shape[0]
+    fig, axes = plt.subplots(B, 4, figsize=(16, 4*B))
+    
+    if B == 1:  # Handle single sample case
+        axes = axes.reshape(1, -1)
+    
+    for i in range(B):
+        # Original output
+        axes[i, 0].imshow(output[i])
+        axes[i, 0].set_title(f'Output {i}')
+        axes[i, 0].axis('off')
+        
+        # Masked output
+        axes[i, 1].imshow(output[i] * mask[i])
+        axes[i, 1].set_title(f'Masked Output {i}')
+        axes[i, 1].axis('off')
+        
+        # Original target
+        axes[i, 2].imshow(target[i])
+        axes[i, 2].set_title(f'Target {i}')
+        axes[i, 2].axis('off')
+        
+        # Masked target
+        axes[i, 3].imshow(target[i] * mask[i])
+        axes[i, 3].set_title(f'Masked Target {i}')
+        axes[i, 3].axis('off')
+    
+    plt.tight_layout()
+    save_path = save_dir / f'masked_images_iter_{iteration}.png'
+    plt.savefig(save_path)
+    plt.close()
+
+def train_one_epoch(model, recon_optimizer, trans_optimizer, train_loader, hr_coords, device, iteration=0, use_gt=False):
     model.train()
 
+    downsample = True
+
+    # if iteration > 20000:
+    #     # Freeze the recon layers in the model
+    #     for layer in model.layers:
+    #         layer.requires_grad_(False)
 
     # Initialize loss functions
     recon_criterion = BasicLosses.mse_loss
@@ -34,53 +86,86 @@ def train_one_epoch(model, recon_optimizer, trans_optimizer, train_loader, hr_co
     
     # Collect all samples into batches
     all_imgs = []
-    all_dx = []
-    all_dy = []
+    all_dx_percent = []  # For shifting in HR space
+    all_dy_percent = []
+    all_dx_pixels_hr = []  # For masking in LR space
+    all_dy_pixels_hr = []
     all_sample_ids = []
 
     for sample in train_loader:
         all_imgs.append(sample['image'])
         all_sample_ids.append(sample['sample_id'])
-        all_dx.append(sample['transform']['dx_percent'])
-        all_dy.append(sample['transform']['dy_percent'])
-    
+        # HR translations for shifting
+        all_dx_percent.append(sample['transform']['dx_percent'])
+        all_dy_percent.append(sample['transform']['dy_percent'])
+        # LR translations for masking
+        all_dx_pixels_hr.append(sample['transform']['dx_hr'])
+        all_dy_pixels_hr.append(sample['transform']['dy_hr'])
+
     # Stack into batches and move to device
-    img_batch = torch.stack(all_imgs).to(device)  # [B, H, W, C]
-    dx_batch = torch.tensor(all_dx).to(device)
-    dy_batch = torch.tensor(all_dy).to(device)
+    img_batch = torch.stack(all_imgs).to(device)
+    dx_batch_percent = torch.tensor(all_dx_percent).to(device)  # For shifting
+    dy_batch_percent = torch.tensor(all_dy_percent).to(device)
+    dx_batch_pixels_hr = torch.tensor(all_dx_pixels_hr).to(device)  # For masking
+    dy_batch_pixels_hr = torch.tensor(all_dy_pixels_hr).to(device)
     sample_id_batch = torch.tensor(all_sample_ids).to(device)
 
     # Process entire batch at once
     features = features.repeat(len(img_batch), 1, 1, 1)  # [B, H, W, C]
     # 16, 256, 256, 2
 
+    dx_batch_hr = dx_batch_percent.unsqueeze(1)
+    dy_batch_hr = dy_batch_percent.unsqueeze(1)
+
     # Forward pass
     recon_optimizer.zero_grad()
     trans_optimizer.zero_grad()
 
-    output, transforms = model(features, sample_id_batch, dx_batch, dy_batch)  # [B, H, W, C]
+    if use_gt:
+        output, transforms = model(
+            features, 
+            sample_id_batch,
+            dx_percent=dx_batch_percent,
+            dy_percent=dy_batch_percent,
+            dx_pixels_hr=dx_batch_pixels_hr,
+            dy_pixels_hr=dy_batch_pixels_hr,
+            lr_shape=(img_batch.shape[1], img_batch.shape[2])
+        )
+    else:
+        output, transforms = model(
+            features, 
+            sample_id_batch,
+            lr_shape=(img_batch.shape[1], img_batch.shape[2])
+        )
 
-    if iteration < 0:
-        output = torch.cat([output[:1], output[1:].detach()])
+    mask = None
+    
+    if isinstance(output, tuple):
+        output, mask = output  # Unpack output and mask
+        # Downsample mask to LR space
+        mask_lr = mask.permute(0, 3, 1, 2)  # [B, 1, H, W]
+        mask_lr = downsample_torch(mask_lr, (img_batch.shape[1], img_batch.shape[2]))
+        mask_lr = mask_lr.permute(0, 2, 3, 1)  # [B, H, W, 1]
+
+
+    output_permuted = output.permute(0, 3, 1, 2)  # [B, 3, H, W]
+    output_downsampled = downsample_torch(output_permuted, (img_batch.shape[1], img_batch.shape[2]))
+    output_final = output_downsampled.permute(0, 2, 3, 1)  # [B, H, W, 3]
+    
+    # Only compute loss on valid pixels
+    #if mask is not None:
+    #    recon_loss = recon_criterion(output_final * mask_lr, img_batch * mask_lr).mean()
+    #else:
+    #    recon_loss = recon_criterion(output_final, img_batch).mean()
+
+    recon_loss = recon_criterion(output_final * mask_lr, img_batch * mask_lr).mean()
+    # recon_loss = recon_criterion(output_final, img_batch).mean()
 
     all_pred_dx = transforms[0].unsqueeze(1)
     all_pred_dy = transforms[1].unsqueeze(1)
-
-    dx_batch = dx_batch.unsqueeze(1)
-    dy_batch = dy_batch.unsqueeze(1)
     
-    translation_loss = trans_criterion(all_pred_dx, dx_batch).mean() + trans_criterion(all_pred_dy, dy_batch).mean()
-    print("tloss:", translation_loss)
+    translation_loss = trans_criterion(all_pred_dx, dx_batch_hr).mean() + trans_criterion(all_pred_dy, dy_batch_hr).mean()
     translation_loss = translation_loss / 2
-
-    # Create new tensors for each operation instead of modifying in place
-    output_permuted = output.permute(0, 3, 1, 2)
-    # output_shifted = apply_shift_torch(output_permuted, all_pred_dx, all_pred_dy)  # [B, C, H, W]
-    output_downsampled = downsample_torch(output_permuted, (img_batch.shape[1], img_batch.shape[2]))  # [B, C, H', W']
-    output_final = output_downsampled.permute(0, 2, 3, 1)  # [B, H', W', C]
-        
-    recon_loss = recon_criterion(output_final, img_batch).mean()
-
 
     # Combined loss with weighting
     # Give more weight to reconstruction loss initially, then gradually increase translation weight
@@ -90,14 +175,17 @@ def train_one_epoch(model, recon_optimizer, trans_optimizer, train_loader, hr_co
     recon_optimizer.step()
     trans_optimizer.step()
     
+    if (iteration + 1) % 100 == 0 and mask is not None:
+        pass
+    
     return {
         'total_loss': total_loss.item(),
         'recon_loss': recon_loss.item(),
         'trans_loss': translation_loss.item(),
         'all_pred_dx': all_pred_dx.detach().cpu().numpy(),
         'all_pred_dy': all_pred_dy.detach().cpu().numpy(),
-        'dx_batch': dx_batch.detach().cpu().numpy(),
-        'dy_batch': dy_batch.detach().cpu().numpy(),
+        'dx_batch_hr': dx_batch_hr.detach().cpu().numpy(),
+        'dy_batch_hr': dy_batch_hr.detach().cpu().numpy(),
     }
 
 def test_one_epoch(model, test_loader, hr_fourier_features, device):
@@ -110,6 +198,10 @@ def test_one_epoch(model, test_loader, hr_fourier_features, device):
     # Add sample_idx=0 for test/inference
     sample_id = torch.tensor([0]).to(device)
     output, _ = model(hr_fourier_features)
+    
+    # Handle case where output is (output, mask) tuple
+    if isinstance(output, tuple):
+        output, _ = output
 
     loss = F.mse_loss(output, img)
 
@@ -205,6 +297,9 @@ def main():
     parser.add_argument("--d", type=str, default="2")
     parser.add_argument("--model", type=str, default="TransformFourierNetwork")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--iters", type=int, default=1000)
+    parser.add_argument("--df", type=int, default=4)
+    parser.add_argument("--use_gt", type=bool, default=False)
 
     args = parser.parse_args()
 
@@ -220,11 +315,11 @@ def main():
 
     device = torch.device(f"cuda:{args.d}" if torch.cuda.is_available() else "cpu")
     network_size = (4, 128)
-    recon_lr = 1e-4
+    recon_lr = 5e-4
     trans_lr = 1e-3
-    iters = 5000
+    iters = args.iters
     mapping_size = 128
-    downsample_factor = 4
+    downsample_factor = args.df
     num_samples = 16
 
 
@@ -245,15 +340,15 @@ def main():
 
     if args.model == "TransformFourierNetwork":
         model = TransformFourierNetwork(mapping_size * 2, *network_size, num_samples).to(device)
-        recon_optimizer = optim.Adam(model.layers.parameters(), lr=recon_lr)
-        trans_optimizer = optim.Adam(
+        recon_optimizer = optim.AdamW(model.layers.parameters(), lr=recon_lr)
+        trans_optimizer = optim.AdamW(
             list(model.transform_vectors.parameters()) + [model.learnable_transform_scale], 
             lr=trans_lr
         )
     else:
         model = FourierNetwork(mapping_size * 2, *network_size, num_samples).to(device)
-        recon_optimizer = optim.Adam(model.layers.parameters(), lr=recon_lr)
-        trans_optimizer = optim.Adam(list(model.transform_vectors.parameters()) + [model.learnable_transform_scale], lr=trans_lr)
+        recon_optimizer = optim.AdamW(model.layers.parameters(), lr=recon_lr)
+        trans_optimizer = optim.AdamW(list(model.transform_vectors.parameters()) + [model.learnable_transform_scale], lr=trans_lr)
 
 
     # Initialize history dictionary
@@ -263,11 +358,12 @@ def main():
         'trans_loss': [],
         'test_loss': [],
         'psnr': [],
-        'baseline_psnr': []
+        'baseline_psnr': [],
+        'translation_data': []  # Add this to store translation data
     }
 
     for i, _ in tqdm(enumerate(range(iters)), total=iters):
-        train_losses = train_one_epoch(model, recon_optimizer, trans_optimizer, train_data, hr_coords, device, iteration=i+1)
+        train_losses = train_one_epoch(model, recon_optimizer, trans_optimizer, train_data, hr_coords, device, iteration=i+1, use_gt=args.use_gt)
         if (i + 1) % 100 == 0:  # More frequent logging
             test_loss, test_output, test_img = test_one_epoch(model, train_data, hr_coords, device)
             
@@ -292,6 +388,14 @@ def main():
             history['test_loss'].append(test_loss)
             history['psnr'].append(psnr_model.item())
             history['baseline_psnr'].append(psnr_baseline.item())
+            # Store translation data
+            history['translation_data'].append({
+                'pred_dx': train_losses['all_pred_dx'],
+                'pred_dy': train_losses['all_pred_dy'],
+                'target_dx': train_losses['dx_batch_hr'],
+                'target_dy': train_losses['dy_batch_hr'],
+                'transform_scale': model.learnable_transform_scale.item()
+            })
 
             print(f"Iter {i+1}: Train recon: {train_losses['recon_loss']:.6f}, "
                   f"trans: {train_losses['trans_loss']:.6f}, "
@@ -299,16 +403,22 @@ def main():
                   f"Test: {test_loss:.6f}, "
                   f"PSNR: {psnr_model:.2f}dB")
             
-            # Create visualizations
-            visualize_translations(
-                torch.tensor(train_losses['all_pred_dx']), 
-                torch.tensor(train_losses['all_pred_dy']),
-                torch.tensor(train_losses['dx_batch']),
-                torch.tensor(train_losses['dy_batch']),
-                transform_scale=model.learnable_transform_scale.item(),
-                save_path=f'translation_vis_iter_{i+1}.png'
-            )
-            plot_training_curves(history, save_path=f'training_curves_iter_{i+1}.png')
+            # Remove visualization calls from here
+
+    # Create all visualizations at the end
+    # Training curves
+    plot_training_curves(history, save_path='final_training_curves.png')
+    
+    # Translation visualization (using last iteration's data)
+    last_trans_data = history['translation_data'][-1]
+    visualize_translations(
+        torch.tensor(last_trans_data['pred_dx']),
+        torch.tensor(last_trans_data['pred_dy']),
+        torch.tensor(last_trans_data['target_dx']),
+        torch.tensor(last_trans_data['target_dy']),
+        transform_scale=last_trans_data['transform_scale'],
+        save_path='final_translation_vis.png'
+    )
 
     # Final test and visualization
     test_loss, test_output, test_img = test_one_epoch(model, train_data, hr_coords, device)
@@ -318,8 +428,7 @@ def main():
         hr_img = torch.from_numpy(test_img[0]).to(device)
         downsampled = downsample_torch(hr_img.permute(2, 0, 1).unsqueeze(0), 
                                      (hr_img.shape[0]//downsample_factor, hr_img.shape[1]//downsample_factor))
-        upsampled = F.interpolate(downsampled, size=(hr_img.shape[0], hr_img.shape[1]), 
-                                mode='bilinear', align_corners=False)
+        upsampled = downsample_torch(downsampled, (hr_img.shape[0], hr_img.shape[1]))
         upsampled = upsampled[0].permute(1, 2, 0).cpu().numpy()
         
         # Calculate PSNR for model output
@@ -362,6 +471,33 @@ def main():
     plt.tight_layout()
     plt.savefig('comparison.png')
     plt.close()
+
+    # Final masking visualization
+    output, transforms = model(
+        hr_coords.unsqueeze(0), 
+        torch.tensor([1]).to(device),
+        lr_shape=(lr_target_img.shape[0], lr_target_img.shape[1])
+    )
+    
+    if isinstance(output, tuple):
+        output, mask = output
+        # Downsample mask to LR space
+        mask_lr = mask.permute(0, 3, 1, 2)  # [B, 1, H, W]
+        mask_lr = downsample_torch(mask_lr, (lr_target_img.shape[0], lr_target_img.shape[1]))
+        
+        # Upsample mask back to HR for visualization
+        mask_hr = F.interpolate(mask_lr, size=(output.shape[1], output.shape[2]), 
+                              mode='nearest')  # Use nearest to keep binary mask
+        mask_hr = mask_hr.permute(0, 2, 3, 1)  # [B, H, W, 1]
+        
+        # Visualize masked images
+        visualize_masked_images(
+            output.detach(), 
+            torch.from_numpy(test_img).to(device),
+            mask_hr,
+            'final',
+            save_dir='./final_mask_vis'
+        )
 
 if __name__ == "__main__":
     main()
