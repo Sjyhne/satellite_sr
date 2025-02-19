@@ -295,7 +295,7 @@ def plot_training_curves(history, save_path='training_curves.png'):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--d", type=str, default="2")
-    parser.add_argument("--model", type=str, default="TransformFourierNetwork")
+    parser.add_argument("--model", type=str, default="FourierNetwork")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--iters", type=int, default=1000)
     parser.add_argument("--df", type=int, default=4)
