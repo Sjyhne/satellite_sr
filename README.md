@@ -54,3 +54,11 @@ This process creates a dataset where:
 
 The goal is to learn these sub-pixel transformations to improve super-resolution quality.
 
+
+
+
+## RUN
+
+> python create_data_from_single_image.py
+
+> python satellite_rs_train.py --iters <num_iters> --d <cuda:device> --use_gt <True/False> --df <downsample_factor>
