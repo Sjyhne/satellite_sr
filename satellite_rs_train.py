@@ -299,6 +299,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--iters", type=int, default=1000)
     parser.add_argument("--df", type=int, default=4)
+    parser.add_argument("--lr_shift", type=float, default=0.5)
     parser.add_argument("--use_gt", type=bool, default=False)
 
     args = parser.parse_args()
@@ -320,11 +321,16 @@ def main():
     iters = args.iters
     mapping_size = 128
     downsample_factor = args.df
+    lr_shift = args.lr_shift
     num_samples = 16
 
+    # Create results directory based on dataset parameters
+    results_dir = Path(f"results/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Saving results to: {results_dir}")
 
     train_data = SRData(
-        f"data/lr_factor_{downsample_factor}x",
+        f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px",
     )
 
     original_hr = train_data.get_original_hr()
@@ -407,7 +413,7 @@ def main():
 
     # Create all visualizations at the end
     # Training curves
-    plot_training_curves(history, save_path='final_training_curves.png')
+    plot_training_curves(history, save_path=results_dir / 'final_training_curves.png')
     
     # Translation visualization (using last iteration's data)
     last_trans_data = history['translation_data'][-1]
@@ -417,7 +423,7 @@ def main():
         torch.tensor(last_trans_data['target_dx']),
         torch.tensor(last_trans_data['target_dy']),
         transform_scale=last_trans_data['transform_scale'],
-        save_path='final_translation_vis.png'
+        save_path=results_dir / 'final_translation_vis.png'
     )
 
     # Final test and visualization
@@ -469,7 +475,7 @@ def main():
     
     plt.suptitle(f'Test loss: {test_loss:.6f} | Model PSNR: {psnr_model:.2f} dB\nBaseline PSNR: {psnr_baseline:.2f} dB | Dataset scale: {downsample_factor}x\nIterations: {iters} | recon_lr: {recon_lr} | trans_lr: {trans_lr}\nModel size: {network_size} | mapping_size: {mapping_size}')
     plt.tight_layout()
-    plt.savefig('comparison.png')
+    plt.savefig(results_dir / 'comparison.png')
     plt.close()
 
     # Final masking visualization
@@ -496,7 +502,7 @@ def main():
             torch.from_numpy(test_img).to(device),
             mask_hr,
             'final',
-            save_dir='./final_mask_vis'
+            save_dir=results_dir / 'final_mask_vis'
         )
 
 if __name__ == "__main__":
