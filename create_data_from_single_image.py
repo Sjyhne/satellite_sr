@@ -64,11 +64,11 @@ def generate_fixed_lr_translations(num_samples, lr_pixel_shifts, factor):
 
 def generate_fixed_magnitude_translations(num_samples, lr_pixel_shift, factor):
     """
-    Generate translations with fixed magnitude in LR space but random directions.
+    Generate translations with random x and y shifts within bounds.
     
     Args:
         num_samples: Number of translations to generate
-        lr_pixel_shift: Desired pixel shift in LR space (e.g., 0.5, 1.0, etc)
+        lr_pixel_shift: Maximum shift in LR space (for both x and y)
         factor: Downsampling factor (to convert LR shifts to HR shifts)
     """
     translations = []
@@ -79,11 +79,11 @@ def generate_fixed_magnitude_translations(num_samples, lr_pixel_shift, factor):
     # Convert LR shift to HR shift
     hr_shift = lr_pixel_shift * factor
     
-    # Generate remaining samples with fixed magnitude but random angles
+    # Generate remaining samples with random x and y shifts
     for i in range(num_samples - 1):
-        angle = random.uniform(0, 2 * np.pi)
-        dx = hr_shift * np.cos(angle)
-        dy = hr_shift * np.sin(angle)
+        # Independent random shifts for x and y, each between -hr_shift and +hr_shift
+        dx = random.uniform(-hr_shift, hr_shift)
+        dy = random.uniform(-hr_shift, hr_shift)
         translations.append((dx, dy))
     
     return translations
