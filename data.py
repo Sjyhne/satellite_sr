@@ -110,3 +110,19 @@ class SRData(torch.utils.data.Dataset):
     def get_downsampled_original_hr(self):
         """Return the downsampled original image"""
         return downsample_torch(self.original, (self.original.shape[1] // 4, self.original.shape[2] // 4))
+
+    def get_lr_sample(self, index):
+        """Get a specific LR sample by index.
+        
+        Args:
+            index: Sample index (0 is the reference sample)
+            
+        Returns:
+            Tensor of shape [C, H, W] with values in [0, 1]
+        """
+        sample_path = self.data_dir / f"sample_{index:02d}.png"
+        img = cv2.imread(str(sample_path))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = torch.from_numpy(img).float() / 255.0
+        img = img.permute(2, 0, 1)  # [H, W, C] -> [C, H, W]
+        return img

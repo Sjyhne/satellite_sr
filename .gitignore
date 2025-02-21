@@ -176,3 +176,5 @@ data/
 final_mask_vis/
 
 *.png
+results/
+wandb/
