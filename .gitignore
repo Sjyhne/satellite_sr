@@ -173,5 +173,8 @@ cython_debug/
 
 
 data/
+final_mask_vis/
+
+*.png
 results/
 wandb/

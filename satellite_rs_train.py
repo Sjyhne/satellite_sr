@@ -70,7 +70,6 @@ def visualize_masked_images(output, target, mask, iteration, save_dir='./mask_vi
 
 def train_one_epoch(model, recon_optimizer, trans_optimizer, train_loader, hr_coords, device, iteration=0, use_gt=False):
     model.train()
-
     downsample = True
 
     # if iteration > 20000:
@@ -208,24 +207,26 @@ def visualize_translations(pred_dx, pred_dy, target_dx, target_dy, save_path='tr
     plt.scatter(pred_dx, pred_dy, c='red', label='Predicted', alpha=0.6)
     
     # Draw lines connecting corresponding points and add annotations
-    for i in range(len(pred_dx)):
-        # Draw connection line
-        plt.plot([target_dx[i], pred_dx[i]], 
-                [target_dy[i], pred_dy[i]], 
-                'gray', alpha=0.3)
-        
-        # Add sample index annotations
-        # For target point
-        plt.annotate(f'{i:02d}', 
-                    (target_dx[i], target_dy[i]),
-                    xytext=(5, 5), textcoords='offset points',
-                    color='blue', fontsize=8)
-        
-        # For predicted point
-        plt.annotate(f'{i:02d}', 
-                    (pred_dx[i], pred_dy[i]),
-                    xytext=(5, 5), textcoords='offset points',
-                    color='red', fontsize=8)
+    # check if pred_dx has a length
+    if pred_dx.dim() > 0:
+        for i in range(len(pred_dx)):
+            # Draw connection line
+            plt.plot([target_dx[i], pred_dx[i]], 
+                    [target_dy[i], pred_dy[i]], 
+                    'gray', alpha=0.3)
+            
+            # Add sample index annotations
+            # For target point
+            plt.annotate(f'{i:02d}', 
+                        (target_dx[i], target_dy[i]),
+                        xytext=(5, 5), textcoords='offset points',
+                        color='blue', fontsize=8)
+            
+            # For predicted point
+            plt.annotate(f'{i:02d}', 
+                        (pred_dx[i], pred_dy[i]),
+                        xytext=(5, 5), textcoords='offset points',
+                        color='red', fontsize=8)
     
     # Add labels and title
     plt.xlabel('Translation X')
@@ -399,6 +400,7 @@ def main():
 
     # 16, 128, 128, 512
 
+
     model = FourierNetwork(mapping_size * 2, *network_size, num_samples).to(device)
     # Create optimizers
     recon_params = (
@@ -408,7 +410,7 @@ def main():
     recon_optimizer = optim.AdamW(recon_params, lr=recon_lr)
 
     # Transform parameters get their own optimizer
-    trans_params = list(model.transform_vectors.parameters())
+    trans_params = list(model.transform_vectors.parameters()) + list(model.frame_codes.parameters())
     trans_optimizer = optim.AdamW(trans_params, lr=trans_lr)
 
 
@@ -629,31 +631,32 @@ def main():
     plt.close()
 
     # Final masking visualization
-    output, transforms = model(
-        hr_coords.unsqueeze(0), 
-        torch.tensor([1]).to(device),
-        lr_shape=(lr_target_img.shape[0], lr_target_img.shape[1])
-    )
-    
-    if isinstance(output, tuple):
-        output, mask = output
-        # Downsample mask to LR space
-        mask_lr = mask.permute(0, 3, 1, 2)  # [B, 1, H, W]
-        mask_lr = downsample_torch(mask_lr, (lr_target_img.shape[0], lr_target_img.shape[1]))
-        
-        # Upsample mask back to HR for visualization
-        mask_hr = F.interpolate(mask_lr, size=(output.shape[1], output.shape[2]), 
-                              mode='nearest')  # Use nearest to keep binary mask
-        mask_hr = mask_hr.permute(0, 2, 3, 1)  # [B, H, W, 1]
-        
-        # Visualize masked images
-        visualize_masked_images(
-            output.detach(), 
-            torch.from_numpy(test_img).to(device),
-            mask_hr,
-            'final',
-            save_dir=results_dir / 'final_mask_vis'
+    if num_samples > 1:
+        output, transforms = model(
+            hr_coords.unsqueeze(0), 
+            torch.tensor([1]).to(device),
+            lr_shape=(lr_target_img.shape[0], lr_target_img.shape[1])
         )
+        
+        if isinstance(output, tuple):
+            output, mask = output
+            # Downsample mask to LR space
+            mask_lr = mask.permute(0, 3, 1, 2)  # [B, 1, H, W]
+            mask_lr = downsample_torch(mask_lr, (lr_target_img.shape[0], lr_target_img.shape[1]))
+            
+            # Upsample mask back to HR for visualization
+            mask_hr = F.interpolate(mask_lr, size=(output.shape[1], output.shape[2]), 
+                                mode='nearest')  # Use nearest to keep binary mask
+            mask_hr = mask_hr.permute(0, 2, 3, 1)  # [B, H, W, 1]
+            
+            # Visualize masked images
+            visualize_masked_images(
+                output.detach(), 
+                torch.from_numpy(test_img).to(device),
+                mask_hr,
+                'final',
+                save_dir=results_dir / 'final_mask_vis'
+            )
 
     # At the end, log final images
     if args.wandb:
