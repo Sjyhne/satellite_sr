@@ -65,7 +65,6 @@ def visualize_masked_images(output, target, mask, iteration, save_dir='./mask_vi
 
 def train_one_epoch(model, recon_optimizer, trans_optimizer, train_loader, hr_coords, device, iteration=0, use_gt=False):
     model.train()
-
     downsample = True
 
     # if iteration > 20000:
@@ -341,14 +340,13 @@ def main():
     if args.model == "TransformFourierNetwork":
         model = TransformFourierNetwork(mapping_size * 2, *network_size, num_samples).to(device)
         recon_optimizer = optim.AdamW(model.layers.parameters(), lr=recon_lr)
-        trans_optimizer = optim.AdamW(
-            list(model.transform_vectors.parameters()) + [model.learnable_transform_scale], 
+        trans_optimizer = optim.AdamW(list(model.transform_vectors.parameters()), 
             lr=trans_lr
         )
     else:
         model = FourierNetwork(mapping_size * 2, *network_size, num_samples).to(device)
         recon_optimizer = optim.AdamW(model.layers.parameters(), lr=recon_lr)
-        trans_optimizer = optim.AdamW(list(model.transform_vectors.parameters()) + [model.learnable_transform_scale], lr=trans_lr)
+        trans_optimizer = optim.AdamW(list(model.transform_vectors.parameters()), lr=trans_lr)
 
 
     # Initialize history dictionary
