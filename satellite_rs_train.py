@@ -340,13 +340,15 @@ def main():
     if args.model == "TransformFourierNetwork":
         model = TransformFourierNetwork(mapping_size * 2, *network_size, num_samples).to(device)
         recon_optimizer = optim.AdamW(model.layers.parameters(), lr=recon_lr)
-        trans_optimizer = optim.AdamW(list(model.transform_vectors.parameters()), 
-            lr=trans_lr
-        )
+        trans_optimizer = optim.AdamW(list(model.transform_vectors.parameters()), lr=trans_lr)
+        # with learnable frame codes
+        trans_optimizer = optim.AdamW(list(model.transform_vectors.parameters()) + list(model.frame_codes.parameters()), lr=trans_lr)
+
     else:
         model = FourierNetwork(mapping_size * 2, *network_size, num_samples).to(device)
         recon_optimizer = optim.AdamW(model.layers.parameters(), lr=recon_lr)
-        trans_optimizer = optim.AdamW(list(model.transform_vectors.parameters()), lr=trans_lr)
+        # with learnable frame codes
+        trans_optimizer = optim.AdamW(list(model.transform_vectors.parameters()) + list(model.frame_codes.parameters()), lr=trans_lr)
 
 
     # Initialize history dictionary

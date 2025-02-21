@@ -20,12 +20,47 @@ def input_mapping(x, B):
 def get_B_gauss(mapping_size, coordinate_dim, scale=10):
     return torch.randn(mapping_size, coordinate_dim) * scale
 
-# PyTorch network definition
+## v1
+# def get_learnable_transforms(num_samples, coordinate_dim=2):
+#     # we freeze the first transform to be zero
+#     params = nn.ParameterList([
+#         nn.ParameterList([
+#             nn.Parameter(torch.zeros(1), requires_grad=(i != 0))
+#             for _ in range(coordinate_dim)
+#         ])
+#         for i in range(num_samples)
+#     ])
+#     return params
+
+## v2 it should be the same as above, however this implementation changes the logging of transform loss. The reconstruction loss is the same and the shifts are also the same.
+# def get_learnable_transforms(num_samples, coordinate_dim=2):
+#     # loop through each sample set requires_grad to False for the first sample
+#     params = nn.ParameterList([
+#         nn.Parameter(torch.zeros(coordinate_dim), requires_grad=True) for i in range(num_samples)
+#     ])
+#     params[0].requires_grad = False
+#     return params
+
+def get_learnable_transforms(num_samples, coordinate_dim=2):
+    # Create a list of learnable tensors
+    params = [nn.Parameter(torch.zeros(coordinate_dim), requires_grad=(i != 0)) for i in range(num_samples)]
+    # Store them in an nn.ParameterList to register them as model parameters
+    return nn.ParameterList(params)  # List of [D] tensors, length B
+
+
+def get_one_hot_encoding(num_classes):
+    return torch.eye(num_classes).cuda()
+
+
 class FourierNetwork(nn.Module):
-    def __init__(self, input_dim, num_layers, num_channels, num_samples, coordinate_dim=2):
+    def __init__(self, input_dim, num_layers, num_channels, num_samples, coordinate_dim=2, code_dim=0):
         super().__init__()
+
+        self.code_dim = code_dim
+
+        # create decoder MLP
         self.layers = nn.ModuleList()
-        self.layers.append(nn.Linear(input_dim, num_channels))
+        self.layers.append(nn.Linear(input_dim+code_dim, num_channels))
         for i in range(num_layers - 2):
             self.layers.append(nn.Linear(num_channels, num_channels))
         self.layers.append(nn.Linear(num_channels, 3))  # Comment says "+1 for transform value" but we removed that feature
@@ -35,14 +70,13 @@ class FourierNetwork(nn.Module):
         self.B = get_B_gauss(input_dim // 2, coordinate_dim)
 
         # Create transform parameters for each sample
-        self.transform_vectors = nn.ParameterList([
-            nn.ParameterList([
-                nn.Parameter(torch.zeros(1), # if i == 0 else ((torch.randn(1) - 0.5) * 0.01),
-                            requires_grad=(i != 0))
-                for _ in range(coordinate_dim)
-            ])
-            for i in range(num_samples)
-        ])
+        self.transform_vectors = get_learnable_transforms(num_samples=num_samples, coordinate_dim=coordinate_dim)
+
+        # learnable codes for each frame
+        if self.code_dim > 0:
+            self.frame_codes = get_learnable_transforms(num_samples, coordinate_dim=code_dim).cuda()
+        else:
+            self.frame_codes = nn.ParameterList([])
 
     def create_translation_mask(self, shape, dx, dy):
         """Create a mask for valid pixels after translation.
@@ -106,21 +140,40 @@ class FourierNetwork(nn.Module):
                     # Use predicted transforms
                     dx = transform[0]
                     dy = transform[1]
-
+                
                 # Apply transforms to coordinates
                 x[i, :, :, 0] += dx
                 x[i, :, :, 1] += dy
-                transforms.append([dx, dy])
+                with torch.no_grad():
+                    transforms.append([dx, dy])
+            
+            with torch.no_grad():
+                # Convert transforms list to tensors
+                dx_list = torch.stack([t[0] for t in transforms])
+                dy_list = torch.stack([t[1] for t in transforms])
 
-            # Convert transforms list to tensors
-            dx_list = torch.stack([t[0] for t in transforms])
-            dy_list = torch.stack([t[1] for t in transforms])
+                # Create mask based on translations
+                mask = self.create_translation_mask(lr_shape, dx_list * W, dy_list * H)
+                mask = mask.unsqueeze(-1)  # Add channel dimension [B, H, W, 1]
 
-            # Create mask based on translations
-            mask = self.create_translation_mask(lr_shape, dx_list * W, dy_list * H)
-            mask = mask.unsqueeze(-1)  # Add channel dimension [B, H, W, 1]
+        # # NOTE: Alternative to sum the self.transform_vectors to the input x
+        # B, H, W, _ = x.shape
+        # transform_vectors = torch.stack(list(self.transform_vectors))  # Shape [B, D]
+        # transform_vectors = transform_vectors[:B, None, None, :].expand(-1, H, W, -1)  # Shape [B, H, W, D]
+        # x += transform_vectors
 
-        x = input_mapping(x, self.B.to(x.device))
+        # Apply Fourier feature mapping
+        x = input_mapping(x, self.B.to(x.device))  # ([16, 256, 256, 256])
+
+
+        # # NOTE: concatenate learned frame_codes to x (maybe useful in combination with transform_vectors to adjust for atmospheric shifts?)   
+        if self.code_dim > 0:
+            B, H, W, F = x.shape
+            frame_codes = torch.stack(list(self.frame_codes))  # Shape [B, D]
+            frame_codes = frame_codes[:B, None, None, :].expand(-1, H, W, -1)  # Shape [B, H, W, D]
+            # concatenate frame codes to x
+            x = torch.cat([x, frame_codes], dim=-1)        
+
 
         # Process through layers
         for i, layer in enumerate(self.layers[:-1]):
