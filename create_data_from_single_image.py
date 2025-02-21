@@ -152,7 +152,7 @@ if __name__ == "__main__":
     
     # Translation settings
     lr_pixel_shifts = [0.5, 1.0, 2.0, 4.0]  # Each will get its own dataset
-    sample_counts = [4, 8, 12, 16]  # Different numbers of samples to test
+    sample_counts = [1, 4, 8, 12, 16]  # Different numbers of samples to test
     
     # Cropping settings
     border_crop = 20  # Pixels to remove from border (black edge)
