@@ -178,3 +178,15 @@ final_mask_vis/
 *.png
 results/
 wandb/
+*.zip
+SyntheticBurstVal/
+burst_test_folder/
+deep_rep/
+handheld/
+test_burst/
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.lzma

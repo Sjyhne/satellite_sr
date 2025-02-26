@@ -148,11 +148,11 @@ if __name__ == "__main__":
     hr_patch_size = 256   # Size of HR patches to extract
     
     # Multiple downsampling factors to generate
-    downsampling_factors = [1, 2, 4, 8]
+    downsampling_factors = [4] # [1, 2, 4, 8]
     
     # Translation settings
-    lr_pixel_shifts = [0.5, 1.0, 2.0, 4.0]  # Each will get its own dataset
-    sample_counts = [1, 4, 8, 12, 16]  # Different numbers of samples to test
+    lr_pixel_shifts = [1] # [0.5, 1.0, 2.0, 4.0]  # Each will get its own dataset
+    sample_counts = [12] #[1, 4, 8, 12, 16]  # Different numbers of samples to test
     
     # Cropping settings
     border_crop = 20  # Pixels to remove from border (black edge)
@@ -210,23 +210,22 @@ if __name__ == "__main__":
         }
     }
     
-    # Process each combination of factor, shift, sample count, and augmentation
+    # Process each combination of factor, shift, and sample count
     for factor in downsampling_factors:
         for lr_shift in lr_pixel_shifts:
             for num_samples in sample_counts:
+                # Generate translations once for all augmentation types
+                random.seed(seed)  # Reset seed before generating translations
+                translations = generate_fixed_magnitude_translations(
+                    num_samples=num_samples,
+                    lr_pixel_shift=lr_shift,
+                    factor=factor
+                )
+                
+                # Now use these same translations for each augmentation type
                 for aug_type in augmentation_types:
                     print(f"\nProcessing factor {factor}x with {lr_shift}px LR shift, "
                           f"{num_samples} samples, and {aug_type} augmentation")
-                    
-                    # Generate translations
-                    translations = generate_fixed_magnitude_translations(
-                        num_samples=num_samples,
-                        lr_pixel_shift=lr_shift,
-                        factor=factor
-                    )
-                    
-                    # Calculate LR patch size
-                    lr_patch_size = hr_patch_size // factor
                     
                     # Create directory for this combination
                     save_folder = base_save_folder / f"lr_factor_{factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{aug_type}"
@@ -269,7 +268,7 @@ if __name__ == "__main__":
                             )
                         
                         # 4. Downsample to LR
-                        shifted_lr = downsample_torch(shifted_patch, (lr_patch_size, lr_patch_size))
+                        shifted_lr = downsample_torch(shifted_patch, (hr_patch_size // factor, hr_patch_size // factor))
                         
                         # 5. Save LR sample
                         lr_np = (shifted_lr[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
@@ -282,8 +281,8 @@ if __name__ == "__main__":
                             'dy_pixels_hr': dy,
                             'dx_pixels_lr': dx / factor,
                             'dy_pixels_lr': dy / factor,
-                            'dx_percent': (dx/factor) / lr_patch_size,
-                            'dy_percent': (dy/factor) / lr_patch_size,
+                            'dx_percent': (dx/factor) / (hr_patch_size // factor),
+                            'dy_percent': (dy/factor) / (hr_patch_size // factor),
                             'magnitude_pixels_hr': np.sqrt(dx**2 + dy**2),
                             'magnitude_pixels_lr': np.sqrt((dx/factor)**2 + (dy/factor)**2),
                             'shape': lr_np.shape,

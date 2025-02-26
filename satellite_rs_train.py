@@ -12,11 +12,11 @@ import pandas as pd  # Add to imports
 from torch.optim.lr_scheduler import CosineAnnealingLR  # Change import
 import lpips  # Add at the top
 from torchmetrics.functional import structural_similarity_index_measure as ssim
-
-from data import SRData
+from torch.utils.data import DataLoader
+from data import SRData, SyntheticBurstVal
 import cv2
 from utils import apply_shift_torch, downsample_torch
-from coordinate_based_mlp import TransformFourierNetwork, FourierNetwork
+from coordinate_based_mlp import FourierNetwork
 from losses import BasicLosses
 
 import argparse
@@ -68,123 +68,109 @@ def visualize_masked_images(output, target, mask, iteration, save_dir='./mask_vi
     plt.savefig(save_path)
     plt.close()
 
-def train_one_epoch(model, recon_optimizer, trans_optimizer, train_loader, hr_coords, device, iteration=0, use_gt=False):
+def train_one_epoch(model, optimizer, train_loader, device, iteration=0, use_gt=False):
     model.train()
-    downsample = True
-
-    # if iteration > 20000:
-    #     # Freeze the recon layers in the model
-    #     for layer in model.layers:
-    #         layer.requires_grad_(False)
 
     # Initialize loss functions
-    recon_criterion = BasicLosses.mae_loss
+    recon_criterion = BasicLosses.mae_loss  # Use MSE loss instead of GaussianNLLLoss
     trans_criterion = BasicLosses.mae_loss
-    
-    # Move Fourier features to device
-    features = hr_coords.to(device)
-    if len(features.shape) == 3:  # If not batched yet
-        features = features.unsqueeze(0)
 
-    # hr_coords 1, 256, 256, 2
-    
-    # Collect all samples into batches
-    all_imgs = []
-    all_dx_percent = []  # For shifting in HR space
-    all_dy_percent = []
-    all_dx_pixels_hr = []  # For masking in LR space
-    all_dy_pixels_hr = []
-    all_sample_ids = []
+    epoch_recon_loss = 0.0
+    epoch_trans_loss = 0.0
+
+    pred_dxs = []
+    pred_dys = []
+    gt_dxs = []
+    gt_dys = []
 
     for sample in train_loader:
-        all_imgs.append(sample['image'])
-        all_sample_ids.append(sample['sample_id'])
-        # HR translations for shifting
-        all_dx_percent.append(sample['transform']['dx_percent'])
-        all_dy_percent.append(sample['transform']['dy_percent'])
-        # LR translations for masking
-        all_dx_pixels_hr.append(sample['transform']['dx_hr'])
-        all_dy_pixels_hr.append(sample['transform']['dy_hr'])
+        input = sample['input'].to(device)
+        lr_target = sample['lr_target'].to(device)
+        sample_id = sample['sample_id'].to(device)
+        
+        # Handle the case where shifts might not be present in the dataset
+        if 'shifts' in sample and 'dx_percent' in sample['shifts']:
+            gt_dx = sample['shifts']['dx_percent'].to(device)
+            gt_dy = sample['shifts']['dy_percent'].to(device)
+        else:
+            # Default to zeros if shifts aren't available
+            gt_dx = torch.zeros(lr_target.shape[0], device=device)
+            gt_dy = torch.zeros(lr_target.shape[0], device=device)
 
-    # Stack into batches and move to device
-    img_batch = torch.stack(all_imgs).to(device)
-    dx_batch_percent = torch.tensor(all_dx_percent).to(device)  # For shifting
-    dy_batch_percent = torch.tensor(all_dy_percent).to(device)
-    dx_batch_pixels_hr = torch.tensor(all_dx_pixels_hr).to(device)  # For masking
-    dy_batch_pixels_hr = torch.tensor(all_dy_pixels_hr).to(device)
-    sample_id_batch = torch.tensor(all_sample_ids).to(device)
+        optimizer.zero_grad()
 
-    # Process entire batch at once
-    features = features.repeat(len(img_batch), 1, 1, 1)  # [B, H, W, C]
-    # 16, 256, 256, 2
+        output, pred_shifts = model(input, sample_id)
+        
+        # Extract variance and output
+        variance = torch.exp(output[..., -1:])
+        output = output[..., :-1]
+        
+        # Downsample to match target resolution
+        output = downsample_torch(output.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
+        variance = downsample_torch(variance.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
 
-    dx_batch_hr = dx_batch_percent.unsqueeze(1)
-    dy_batch_hr = dy_batch_percent.unsqueeze(1)
-
-    # Forward pass
-    recon_optimizer.zero_grad()
-    trans_optimizer.zero_grad()
-
-    if use_gt:
-        output, transforms = model(
-            features, 
-            sample_id_batch,
-            dx_percent=dx_batch_percent,
-            dy_percent=dy_batch_percent
-        )
-    else:
-        output, transforms = model(
-            features, 
-            sample_id_batch
-        )
-
-    # Downsample output to match LR target size
-    output_permuted = output.permute(0, 3, 1, 2)
-    output_downsampled = downsample_torch(output_permuted, (img_batch.shape[1], img_batch.shape[2]))
-    output_final = output_downsampled.permute(0, 2, 3, 1)
-
-    # Calculate reconstruction loss
-    recon_loss = recon_criterion(output_final, img_batch)
-
-    # Handle transforms if they exist
-    trans_loss = 0
-    if transforms is not None:
-        pred_dx, pred_dy = transforms
-        trans_loss = trans_criterion(pred_dx, dx_batch_percent) + trans_criterion(pred_dy, dy_batch_percent)
-
-    # Total loss
-    total_loss = recon_loss
-
-    # Backward pass
-    total_loss.backward()
-    recon_optimizer.step()
-    trans_optimizer.step()
+        # Calculate reconstruction loss - ensure it's a scalar
+        recon_loss = recon_criterion(output, lr_target)
+        
+        # Calculate translation loss
+        pred_dx, pred_dy = pred_shifts
+        trans_loss = trans_criterion(pred_dx, gt_dx) + trans_criterion(pred_dy, gt_dy)
+        
+        # Combine losses and backpropagate
+        recon_loss.backward()
+        optimizer.step()
+        
+        # Track metrics
+        epoch_recon_loss += recon_loss.item()
+        epoch_trans_loss += trans_loss.item()
+        
+        # Store predictions for visualization
+        pred_dxs.extend(pred_dx.detach().cpu().numpy())
+        pred_dys.extend(pred_dy.detach().cpu().numpy())
+        gt_dxs.extend(gt_dx.detach().cpu().numpy())
+        gt_dys.extend(gt_dy.detach().cpu().numpy())
+    
+    # Calculate average losses
+    epoch_recon_loss /= len(train_loader)
+    epoch_trans_loss /= len(train_loader)
+    epoch_total_loss = epoch_recon_loss + epoch_trans_loss
 
     return {
-        'recon_loss': recon_loss.item(),
-        'trans_loss': trans_loss.item() if isinstance(trans_loss, torch.Tensor) else trans_loss,
-        'total_loss': total_loss.item(),
-        'all_pred_dx': pred_dx.detach().cpu().numpy() if transforms is not None else None,
-        'all_pred_dy': pred_dy.detach().cpu().numpy() if transforms is not None else None,
-        'dx_batch_hr': dx_batch_percent.cpu().numpy(),
-        'dy_batch_hr': dy_batch_percent.cpu().numpy()
+        'recon_loss': epoch_recon_loss,
+        'trans_loss': epoch_trans_loss,
+        'total_loss': epoch_total_loss,
+        'pred_dx': pred_dxs,
+        'pred_dy': pred_dys,
+        'gt_dx': gt_dxs,
+        'gt_dy': gt_dys
     }
 
-def test_one_epoch(model, test_loader, hr_fourier_features, device):
+def test_one_epoch(model, test_loader, device):
     model.eval()
 
-    hr_fourier_features = hr_fourier_features.unsqueeze(0).to(device)
-    img = test_loader.get_original_hr()
-    img = img.unsqueeze(0).to(device)
+    # Get HR features from the test loader
+    hr_coords = test_loader.get_hr_coordinates().unsqueeze(0).to(device)
+    img = test_loader.get_original_hr().unsqueeze(0).to(device)
     
     # Add sample_idx=0 for test/inference
     sample_id = torch.tensor([0]).to(device)
-    output, _ = model(hr_fourier_features)
-    
+    output, _ = model(hr_coords, sample_id)
+
     # Handle case where output is (output, mask) tuple
     if isinstance(output, tuple):
         output, _ = output
 
+    # Remove variance channel
+    output = output[..., :-1]
+    
+    # Convert RGGB to RGB if needed
+    if output.shape[-1] == 4 and img.shape[-1] == 3:
+        R = output[..., 0]
+        G = (output[..., 1] + output[..., 2]) / 2
+        B = output[..., 3]
+        output = torch.stack([R, G, B], dim=-1)
+    
+    # Calculate loss
     loss = F.mse_loss(output, img)
 
     return loss.item(), output.detach().cpu().numpy(), img.detach().cpu().numpy()
@@ -327,12 +313,11 @@ def plot_training_curves(history, save_path='training_curves.png'):
 
     # Plot learning rates
     plt.subplot(5, 1, 5)
-    plt.plot(history['iterations'], history['recon_lr'], label='Reconstruction LR')
-    plt.plot(history['iterations'], history['trans_lr'], label='Transform LR')
+    plt.plot(history['iterations'], history['learning_rate'], label='Learning Rate')
     plt.yscale('log')
     plt.grid(True, alpha=0.3)
     plt.legend()
-    plt.title('Learning Rates')
+    plt.title('Learning Rate')
     plt.xlabel('Iteration')
     plt.ylabel('Learning Rate')
 
@@ -372,8 +357,7 @@ def main():
 
     device = torch.device(f"cuda:{args.d}" if torch.cuda.is_available() else "cpu")
     network_size = (4, 128)
-    recon_lr = 5e-4
-    trans_lr = 1e-3
+    learning_rate = 5e-3
     iters = args.iters
     mapping_size = 128
     downsample_factor = args.df
@@ -388,35 +372,18 @@ def main():
     train_data = SRData(
         f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}",
     )
+    
+    # train_data = SyntheticBurstVal("SyntheticBurstVal", 0)
 
-    original_hr = train_data.get_original_hr()
-    lr_sample = train_data.get_random_lr_sample()
+    batch_size = len(train_data)
 
-    # Create input pixel coordinates in the unit square
-    hr_coords = np.linspace(0, 1, original_hr.shape[0], endpoint=False)
-    hr_coords = np.stack(np.meshgrid(hr_coords, hr_coords), -1)
-    hr_coords = torch.FloatTensor(hr_coords).to(device)
+    # initialize the dataloader here
+    train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
 
+    model = FourierNetwork(mapping_size * 2, *network_size, len(train_data), rggb=False).to(device)
 
-    # 16, 128, 128, 512
-
-
-    model = FourierNetwork(mapping_size * 2, *network_size, num_samples).to(device)
-    # Create optimizers
-    recon_params = (
-        list(model.layers.parameters()) + 
-        list(model.color_scales.parameters())  # Add color transform params
-    )
-    recon_optimizer = optim.AdamW(recon_params, lr=recon_lr)
-
-    # Transform parameters get their own optimizer
-    trans_params = list(model.transform_vectors.parameters()) + list(model.frame_codes.parameters())
-    trans_optimizer = optim.AdamW(trans_params, lr=trans_lr)
-
-
-    # Change back to regular cosine annealing
-    recon_scheduler = CosineAnnealingLR(recon_optimizer, T_max=iters, eta_min=1e-5)
-    trans_scheduler = CosineAnnealingLR(trans_optimizer, T_max=iters, eta_min=1e-5)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    scheduler = CosineAnnealingLR(optimizer, T_max=iters, eta_min=1e-6)
 
     # Initialize history dictionary with new metrics
     history = {
@@ -431,8 +398,7 @@ def main():
         'baseline_lpips': [],
         'baseline_ssim': [],
         'translation_data': [],
-        'recon_lr': [],  # Add these new keys
-        'trans_lr': []
+        'learning_rate': []  # Changed from recon_lr and trans_lr to single learning_rate
     }
 
     # Initialize wandb if enabled
@@ -449,8 +415,7 @@ def main():
                 "num_samples": num_samples,
                 "iters": iters,
                 "network_size": network_size,
-                "recon_lr": recon_lr,
-                "trans_lr": trans_lr,
+                "learning_rate": learning_rate,
                 "mapping_size": mapping_size,
                 "use_gt": args.use_gt,
                 "augmentation": args.aug
@@ -482,14 +447,13 @@ def main():
         }
 
     for i, _ in tqdm(enumerate(range(iters)), total=iters):
-        train_losses = train_one_epoch(model, recon_optimizer, trans_optimizer, train_data, hr_coords, device, iteration=i+1, use_gt=args.use_gt)
+        train_losses = train_one_epoch(model, optimizer, train_dataloader, device, iteration=i+1, use_gt=args.use_gt)
         
         # Regular step (no need to pass iteration number)
-        #recon_scheduler.step()
-        #trans_scheduler.step()
+        scheduler.step()
         
         if (i + 1) % 100 == 0:  # More frequent logging
-            test_loss, test_output, test_img = test_one_epoch(model, train_data, hr_coords, device)
+            test_loss, test_output, test_img = test_one_epoch(model, train_data, device)
             
             # Convert test outputs to correct format
             test_output_tensor = torch.from_numpy(test_output[0]).permute(2, 0, 1).unsqueeze(0).to(device)
@@ -522,15 +486,14 @@ def main():
             history['baseline_ssim'].append(baseline_metrics['ssim'])
             # Store translation data
             history['translation_data'].append({
-                'pred_dx': train_losses['all_pred_dx'],
-                'pred_dy': train_losses['all_pred_dy'],
-                'target_dx': train_losses['dx_batch_hr'],
-                'target_dy': train_losses['dy_batch_hr'],
+                'pred_dx': train_losses['pred_dx'],
+                'pred_dy': train_losses['pred_dy'],
+                'target_dx': train_losses['gt_dx'],
+                'target_dy': train_losses['gt_dy'],
             })
 
             # Store learning rates in history
-            history['recon_lr'].append(recon_scheduler.get_last_lr()[0])
-            history['trans_lr'].append(trans_scheduler.get_last_lr()[0])
+            history['learning_rate'].append(scheduler.get_last_lr()[0])
 
             # Print all metrics
             print(f"Iter {i+1}: "
@@ -556,10 +519,9 @@ def main():
                     "test/baseline_psnr": baseline_metrics['psnr'],
                     "test/baseline_lpips": baseline_metrics['lpips'],
                     "test/baseline_ssim": baseline_metrics['ssim'],
-                    "learning_rates/recon_lr": recon_scheduler.get_last_lr()[0],
-                    "learning_rates/trans_lr": trans_scheduler.get_last_lr()[0],
+                    "learning_rate": scheduler.get_last_lr()[0],
                     "metrics/psnr_improvement": model_metrics['psnr'] - baseline_metrics['psnr'],
-                    "metrics/lpips_improvement": baseline_metrics['lpips'] - model_metrics['lpips'],  # Reversed because lower is better
+                    "metrics/lpips_improvement": baseline_metrics['lpips'] - model_metrics['lpips'],
                     "metrics/ssim_improvement": model_metrics['ssim'] - baseline_metrics['ssim'],
                 })
 
@@ -578,7 +540,7 @@ def main():
     )
 
     # Final test and visualization
-    test_loss, test_output, test_img = test_one_epoch(model, train_data, hr_coords, device)
+    test_loss, test_output, test_img = test_one_epoch(model, train_data, device)
     
     # Create downsampled then upsampled version for comparison
     with torch.no_grad():
@@ -599,9 +561,24 @@ def main():
     # Get LR target image (use sample_00 as it matches the HR ground truth)
     lr_target_img = train_data.get_lr_sample(0)  # Get sample_00
     if torch.is_tensor(lr_target_img):
-        # Convert from [C, H, W] to [H, W, C] format for plotting
-        lr_target_img = lr_target_img.permute(1, 2, 0).numpy()
-    
+        # First, ensure the image is in the right format
+        # If it's [C, H, W], convert to [H, W, C]
+        if lr_target_img.shape[0] == 4 or lr_target_img.shape[0] == 3:
+            # It's in [C, H, W] format, convert to [H, W, C]
+            lr_target_img = lr_target_img.permute(1, 2, 0)
+        
+        # Now check if it's a RAW Bayer image with 4 channels
+        if lr_target_img.shape[2] == 4:
+            # Convert RGGB to RGB for visualization
+            R = lr_target_img[..., 0]
+            G = (lr_target_img[..., 1] + lr_target_img[..., 2]) / 2
+            B = lr_target_img[..., 3]
+            # Stack to create RGB image
+            lr_target_img = torch.stack([R, G, B], dim=-1)
+        
+        # Convert to numpy for plotting
+        lr_target_img = lr_target_img.numpy()
+
     # Create side by side visualization
     plt.figure(figsize=(24, 6))
     
@@ -625,38 +602,10 @@ def main():
     plt.title(f'Pred\nPSNR: {psnr_model:.2f} dB')
     plt.axis('off')
     
-    plt.suptitle(f'Test loss: {test_loss:.6f} | Model PSNR: {psnr_model:.2f} dB\nBaseline PSNR: {psnr_baseline:.2f} dB | Dataset scale: {downsample_factor}x\nIterations: {iters} | recon_lr: {recon_lr} | trans_lr: {trans_lr}\nModel size: {network_size} | mapping_size: {mapping_size}')
+    plt.suptitle(f'Test loss: {test_loss:.6f} | Model PSNR: {psnr_model:.2f} dB\nBaseline PSNR: {psnr_baseline:.2f} dB | Dataset scale: {downsample_factor}x\nIterations: {iters} | learning_rate: {scheduler.get_last_lr()[0]}\nModel size: {network_size} | mapping_size: {mapping_size}')
     plt.tight_layout()
     plt.savefig(results_dir / 'comparison.png')
     plt.close()
-
-    # Final masking visualization
-    if num_samples > 1:
-        output, transforms = model(
-            hr_coords.unsqueeze(0), 
-            torch.tensor([1]).to(device),
-            lr_shape=(lr_target_img.shape[0], lr_target_img.shape[1])
-        )
-        
-        if isinstance(output, tuple):
-            output, mask = output
-            # Downsample mask to LR space
-            mask_lr = mask.permute(0, 3, 1, 2)  # [B, 1, H, W]
-            mask_lr = downsample_torch(mask_lr, (lr_target_img.shape[0], lr_target_img.shape[1]))
-            
-            # Upsample mask back to HR for visualization
-            mask_hr = F.interpolate(mask_lr, size=(output.shape[1], output.shape[2]), 
-                                mode='nearest')  # Use nearest to keep binary mask
-            mask_hr = mask_hr.permute(0, 2, 3, 1)  # [B, H, W, 1]
-            
-            # Visualize masked images
-            visualize_masked_images(
-                output.detach(), 
-                torch.from_numpy(test_img).to(device),
-                mask_hr,
-                'final',
-                save_dir=results_dir / 'final_mask_vis'
-            )
 
     # At the end, log final images
     if args.wandb:
@@ -722,7 +671,7 @@ def main():
                 max_length = max(
                     master_df[col].astype(str).apply(len).max(),
                     len(str(col))
-                    )
+                )
                 worksheet.column_dimensions[chr(65 + idx)].width = max_length + 2
 
     except Exception as e:
