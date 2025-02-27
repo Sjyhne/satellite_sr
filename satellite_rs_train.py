@@ -13,7 +13,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR  # Change import
 import lpips  # Add at the top
 from torchmetrics.functional import structural_similarity_index_measure as ssim
 from torch.utils.data import DataLoader
-from data import SRData, SyntheticBurstVal
+from data import SRData, SyntheticBurstVal, WorldStratDatasetFrame
 import cv2
 from utils import apply_shift_torch, downsample_torch
 from coordinate_based_mlp import FourierNetwork
@@ -339,6 +339,7 @@ def main():
     parser.add_argument("--aug", type=str, default="none", 
                        choices=['none', 'light', 'medium', 'heavy'],
                        help="Augmentation level to use")
+    parser.add_argument("--root_worldstrat", type=str, default="/home/nlang/data/worldstrat_kaggle")
 
     args = parser.parse_args()
 
@@ -369,11 +370,10 @@ def main():
     results_dir.mkdir(parents=True, exist_ok=True)
     print(f"Saving results to: {results_dir}")
 
-    train_data = SRData(
-        f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}",
-    )
-    
+    train_data = SRData(f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}")
+    # train_data = WorldStratDatasetFrame(dataset_root=args.root_worldstrat, area_name="UNHCR-LBNs006446")
     # train_data = SyntheticBurstVal("SyntheticBurstVal", 0)
+    
 
     batch_size = len(train_data)
 
