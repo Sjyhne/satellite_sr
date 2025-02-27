@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 import cv2
@@ -5,6 +6,7 @@ import json
 from pathlib import Path
 import rawpy
 import pickle as pkl
+import tifffile
 
 from utils import downsample_torch
 
@@ -244,6 +246,108 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
         coords_w = np.linspace(0, 1, w, endpoint=False)
         coords = np.stack(np.meshgrid(coords_h, coords_w), -1)
         return torch.FloatTensor(coords)
+
+
+
+class WorldStratDatasetFrame(torch.utils.data.Dataset):
+    """ Returns single LR frames in getitem """
+    def __init__(self, dataset_root, area_name="UNHCR-LBNs006446", num_frames=8):
+        """
+        Args:
+            dataset_root (str): Path to the dataset.
+            area_name (str): area name.
+        """
+
+        self.dataset_root = '/home/nlang/data/worldstrat_kaggle'
+        self.hr_dataset = "{}/hr_dataset/12bit".format(dataset_root)
+        self.lr_dataset = "{}/lr_dataset".format(dataset_root)
+        #self.metadata_df = pd.read_csv("{}/metadata.csv".format(dataset_root))
+
+        self.area_name = area_name
+        self.num_frames = num_frames    
+        self.hr_img_size = 512
+
+        # Load high-resolution image
+        self.hr_image = self.get_hr()   # Shape: (hr_img_size, hr_img_size, 3)
+        self.hr_image = cv2.resize(self.hr_image, (self.hr_img_size, self.hr_img_size))
+        self.hr_image = torch.tensor(self.hr_image)
+        
+
+        # Create input coordinate grid that matches the HR image
+        self.hr_coords = np.linspace(0, 1, self.hr_image.shape[0], endpoint=False)
+        self.hr_coords = np.stack(np.meshgrid(self.hr_coords, self.hr_coords), -1)
+        self.hr_coords = torch.FloatTensor(self.hr_coords)
+    
+    def __len__(self):
+        # TODO
+        return self.num_frames
+    
+    def get_hr(self):
+        """Loads and processes the high-resolution image."""
+        hr_rgb_path = os.path.join(self.hr_dataset, self.area_name, f"{self.area_name}_rgb.png")
+        print(hr_rgb_path)
+        hr_rgb_img = cv2.imread(hr_rgb_path)
+        print(hr_rgb_img.shape)
+        hr_rgb_img = cv2.cvtColor(hr_rgb_img, cv2.COLOR_BGR2RGB)
+        return hr_rgb_img.astype(np.float32) / 255.0  # Normalize
+    
+    def get_lr(self, frame_id):
+        """Loads a single LR frame."""
+
+        # files start with index 1 (not 0)
+        frame_id+=1
+
+        lr_sample_path = os.path.join(self.lr_dataset, self.area_name, "L2A")
+        lr_rgb_path = os.path.join(lr_sample_path, f"{self.area_name}-{frame_id}-L2A_data.tiff")
+        lr_rgb_img = tifffile.imread(lr_rgb_path)[:, :, 4:1:-1].copy()  # Select RGB bands and reverse order
+        lr_rgb_img = torch.tensor(lr_rgb_img, dtype=torch.float32).clip(0, 1)  # Data is already normalized, but needs to be clipped
+
+        return lr_rgb_img
+    
+    def __getitem__(self, idx):
+        lr_image = self.get_lr(frame_id=idx)  # Shape: (8, lr_img_size, lr_img_size, 3)
+        
+        # Convert to torch tensors
+        lr_image = torch.tensor(lr_image)
+        
+        return {
+            'input': self.hr_coords,
+            'lr_target': lr_image,
+            'sample_id': idx,
+            # note: the true shifts are unknown, set to default 0
+            'shifts': {
+                'dx_lr': 0,
+                'dy_lr': 0,
+                'dx_hr': 0,
+                'dy_hr': 0,
+                'dx_percent': 0,
+                'dy_percent': 0
+            }
+        }
+    
+    def get_original_hr(self):
+        """Return the original image (before any transformations)"""
+        return self.hr_image
+    
+    def get_downsampled_original_hr(self):
+        """Return the downsampled original image"""
+        return downsample_torch(self.hr_image, (self.hr_image.shape[1] // 4, self.hr_image.shape[2] // 4))
+
+    def get_hr_coordinates(self):
+        """Return the high-resolution coordinates."""
+        return self.hr_coords
+    
+    def get_lr_sample(self, index):
+        """Get a specific LR sample by index.
+        
+        Args:
+            index: Sample index (0 is the reference sample)
+            
+        Returns:
+            Tensor of shape [C, H, W] with values in [0, 1]
+        """
+        return self.get_lr(index)
+    
 
 if __name__ == "__main__":
     dataset = SyntheticBurstVal("SyntheticBurstVal", 0)
