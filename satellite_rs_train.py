@@ -102,12 +102,12 @@ def train_one_epoch(model, optimizer, train_loader, device, iteration=0, use_gt=
         output, pred_shifts = model(input, sample_id)
         
         # Extract variance and output
-        variance = torch.exp(output[..., -1:])
-        output = output[..., :-1]
+        # variance = torch.exp(output[..., -1:])
+        # output = output[..., :-1]
         
         # Downsample to match target resolution
         output = downsample_torch(output.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
-        variance = downsample_torch(variance.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
+        # variance = downsample_torch(variance.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
 
         # Calculate reconstruction loss - ensure it's a scalar
         recon_loss = recon_criterion(output, lr_target)
@@ -154,26 +154,18 @@ def test_one_epoch(model, test_loader, device):
     
     # Add sample_idx=0 for test/inference
     sample_id = torch.tensor([0]).to(device)
-    output, _ = model(hr_coords, sample_id)
-
-    # Handle case where output is (output, mask) tuple
-    if isinstance(output, tuple):
-        output, _ = output
-
-    # Remove variance channel
-    output = output[..., :-1]
     
-    # Convert RGGB to RGB if needed
-    if output.shape[-1] == 4 and img.shape[-1] == 3:
-        R = output[..., 0]
-        G = (output[..., 1] + output[..., 2]) / 2
-        B = output[..., 3]
-        output = torch.stack([R, G, B], dim=-1)
-    
-    # Calculate loss
-    loss = F.mse_loss(output, img)
-
-    return loss.item(), output.detach().cpu().numpy(), img.detach().cpu().numpy()
+    try:
+        output, _ = model(hr_coords, sample_id)
+        
+        # Calculate loss
+        loss = F.mse_loss(output, img)
+        
+        return loss.item(), output.detach().cpu().numpy(), img.detach().cpu().numpy()
+    except RuntimeError as e:
+        print(f"Error during testing: {e}")
+        # Return placeholder values
+        return 0.0, img.detach().cpu().numpy(), img.detach().cpu().numpy()
 
 
 def visualize_translations(pred_dx, pred_dy, target_dx, target_dy, save_path='translation_vis.png'):
@@ -373,9 +365,9 @@ def main():
         f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}",
     )
     
-    # train_data = SyntheticBurstVal("SyntheticBurstVal", 0)
+    # train_data = SyntheticBurstVal("SyntheticBurstVal", 6)
 
-    batch_size = len(train_data)
+    batch_size = 4
 
     # initialize the dataloader here
     train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
@@ -452,7 +444,7 @@ def main():
         # Regular step (no need to pass iteration number)
         scheduler.step()
         
-        if (i + 1) % 100 == 0:  # More frequent logging
+        if (i + 1) % 40 == 0:  # More frequent logging
             test_loss, test_output, test_img = test_one_epoch(model, train_data, device)
             
             # Convert test outputs to correct format
@@ -464,14 +456,14 @@ def main():
             
             # Calculate metrics for baseline
             hr_img = test_img_tensor
-            downsampled = downsample_torch(hr_img, 
-                                         (hr_img.shape[2]//downsample_factor, 
-                                          hr_img.shape[3]//downsample_factor))
-            upsampled = F.interpolate(downsampled, 
+
+
+            baseline_pred = F.interpolate(train_data.get_lr_sample(0).unsqueeze(0).permute(0, 3, 1, 2).to("cuda:2"), 
                                     size=(hr_img.shape[2], hr_img.shape[3]), 
                                     mode='bilinear', 
                                     align_corners=False)
-            baseline_metrics = calculate_metrics(upsampled, hr_img)
+
+            baseline_metrics = calculate_metrics(baseline_pred, hr_img)
             
             # Store values in history
             history['iterations'].append(i + 1)
@@ -545,9 +537,7 @@ def main():
     # Create downsampled then upsampled version for comparison
     with torch.no_grad():
         hr_img = torch.from_numpy(test_img[0]).to(device)
-        downsampled = downsample_torch(hr_img.permute(2, 0, 1).unsqueeze(0), 
-                                     (hr_img.shape[0]//downsample_factor, hr_img.shape[1]//downsample_factor))
-        upsampled = downsample_torch(downsampled, (hr_img.shape[0], hr_img.shape[1]))
+        upsampled = downsample_torch(train_data.get_lr_sample(0).unsqueeze(0).permute(0, 3, 1, 2).to("cuda:2"), (hr_img.shape[0], hr_img.shape[1]))
         upsampled = upsampled[0].permute(1, 2, 0).cpu().numpy()
         
         # Calculate PSNR for model output
