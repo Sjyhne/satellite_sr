@@ -2,89 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-
+import einops
 import numpy as np
 
 from utils import apply_shift_torch
-
-def nystrom_mapping(x, Z, kernel_fn):
-    """
-    Nyström feature mapping.
-    
-    Parameters:
-      x: torch.Tensor of shape (n_samples, input_dim)
-      Z: torch.Tensor of landmark points with shape (n_landmarks, input_dim)
-         If Z is None, the function returns x unchanged.
-      kernel_fn: function to compute the kernel between two sets of points.
-                 It should accept two arguments (e.g., kernel_fn(x, Z)) and return a tensor.
-    
-    Returns:
-      phi_x: torch.Tensor of shape (n_samples, n_landmarks) representing the approximate feature mapping.
-    """
-    if Z is None:
-        return x
-    else:
-        # Compute kernel between x and landmark points (n_samples x n_landmarks)
-        K_xZ = kernel_fn(x, Z)
-        # Compute kernel matrix among landmarks (n_landmarks x n_landmarks)
-        K_ZZ = kernel_fn(Z, Z)
-        # Compute SVD of the landmark kernel matrix
-        U, S, _ = torch.svd(K_ZZ)
-        # Compute the inverse square root of singular values for stability (add epsilon)
-        eps = 1e-6
-        S_inv_sqrt = torch.diag(1.0 / torch.sqrt(S + eps))
-        # Form the Nyström mapping: phi(x) = K(x, Z) * U * S^{-1/2}
-        phi_x = K_xZ @ U @ S_inv_sqrt
-        return phi_x
-
-
-def random_maclaurin_mapping(x, D=128, degree=2, c=1):
-    """
-    Random Maclaurin feature mapping for approximating polynomial kernels.
-    
-    Approximates the kernel (x^T y + c)^degree using D random features.
-    
-    Parameters:
-      x: torch.Tensor of shape (n_samples, input_dim)
-      D: int, number of random features to generate.
-         If D is None, the function returns x unchanged.
-      degree: int, degree of the polynomial kernel.
-      c: float, constant offset in the polynomial kernel (default is 0.0).
-      
-    Returns:
-      phi_x: torch.Tensor of shape (n_samples, D) representing the approximate feature mapping.
-    """
-    if D is None or degree is None:
-        return x
-    else:
-        n, input_dim = x.shape
-        features = []
-        for i in range(D):
-            # Randomly sample indices for this monomial (sampled with replacement)
-            indices = torch.randint(low=0, high=input_dim, size=(degree,))
-            # Randomly assign signs (+1 or -1) for each coordinate
-            signs = 2 * torch.randint(0, 2, (degree,), dtype=torch.float32) - 1.0
-            # Select the corresponding coordinates: shape (n, degree)
-            x_selected = x[:, indices]
-            # Apply the random signs
-            x_weighted = x_selected * signs
-            # Optionally incorporate constant offset c.
-            if c != 0.0:
-                # A simple way is to add a constant offset to each term.
-                # Here we add sqrt(c/degree) to each term as a rough heuristic.
-                offset = np.sqrt(c / degree)
-                x_weighted = x_weighted + offset
-            # Multiply the selected coordinates to form one feature per sample
-            feature = torch.prod(x_weighted, dim=1, keepdim=True)
-            features.append(feature)
-        # Concatenate all D features (resulting shape: n x D)
-        phi_x = torch.cat(features, dim=1)
-        # Optionally normalize the features
-        phi_x = phi_x / torch.sqrt(torch.tensor(D, dtype=phi_x.dtype))
-        return phi_x
-
-
-
 
 
 # Fourier feature mapping
@@ -95,8 +16,8 @@ def input_mapping(x, B):
         x_proj = (2. * np.pi * x) @ B.T
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
-def get_B_gauss(mapping_size, coordinate_dim, scale=10):
-    return torch.randn(mapping_size, coordinate_dim) * scale
+def get_B_gauss(mapping_size, coordinate_dim, scale=3, device=None):
+    return torch.randn(mapping_size, coordinate_dim, device=device)
 
 ## v1
 # def get_learnable_transforms(num_samples, coordinate_dim=2):
@@ -140,15 +61,23 @@ class FourierNetwork(nn.Module):
         self.code_dim = code_dim
         self.rggb = rggb
 
+        self.input_dim = input_dim
+        self.coordinate_dim = coordinate_dim
+
+        self.ff_scale = nn.Parameter(torch.ones(1) * 3) 
+
         # create decoder MLP
         self.layers = nn.ModuleList()
         self.layers.append(nn.Linear(input_dim + code_dim, num_channels))
+
         for i in range(num_layers - 2):
             self.layers.append(nn.Linear(num_channels, num_channels))
+        
+        # Output layer
         if self.rggb:
-            self.layers.append(nn.Linear(num_channels, 5))
-        else:
             self.layers.append(nn.Linear(num_channels, 4))
+        else:
+            self.layers.append(nn.Linear(num_channels, 3))
 
         self.B = get_B_gauss(input_dim // 2, coordinate_dim)
 
@@ -157,7 +86,7 @@ class FourierNetwork(nn.Module):
 
         # learnable codes for each frame
         if self.code_dim > 0:
-            self.frame_codes = get_learnable_transforms(num_samples, coordinate_dim=code_dim).cuda()
+            self.frame_codes = get_learnable_transforms(num_samples, coordinate_dim=code_dim)
         else:
             self.frame_codes = nn.ParameterList([])
         if self.rggb:
@@ -166,8 +95,6 @@ class FourierNetwork(nn.Module):
         else:
             self.color_shifts = get_learnable_transforms(num_samples, coordinate_dim=3)
             self.color_scales = get_learnable_transforms(num_samples, coordinate_dim=3, zeros=False)
-
-
 
 
     def apply_color_transform(self, x, sample_idx):
@@ -184,6 +111,7 @@ class FourierNetwork(nn.Module):
                 else:
                     scales = self.color_scales[idx].view(3, 1, 1)  # reshape to [3, 1, 1] for broadcasting
                     shifts = self.color_shifts[idx].view(3, 1, 1)  # reshape to [3, 1, 1] for broadcasting
+
                 # Apply channel-wise scaling
                 result[i] = x_reshaped[i] * scales + shifts
         
@@ -219,15 +147,8 @@ class FourierNetwork(nn.Module):
                 # Convert transforms list to tensors
                 dx_list = torch.stack(dx_list)
                 dy_list = torch.stack(dy_list)
-
-        # # NOTE: Alternative to sum the self.transform_vectors to the input x
-        # B, H, W, _ = x.shape
-        # transform_vectors = torch.stack(list(self.transform_vectors))  # Shape [B, D]
-        # transform_vectors = transform_vectors[:B, None, None, :].expand(-1, H, W, -1)  # Shape [B, H, W, D]
-        # x += transform_vectors
-
-        # Apply Fourier feature mapping
-        x = input_mapping(x, self.B.to(x.device))  # ([16, 256, 256, 256])
+        
+        x = input_mapping(x, self.B.to(x.device) * self.ff_scale)
 
         # # NOTE: concatenate learned frame_codes to x (maybe useful in combination with transform_vectors to adjust for atmospheric shifts?)   
         if self.code_dim > 0:
@@ -238,21 +159,17 @@ class FourierNetwork(nn.Module):
             x = torch.cat([x, frame_codes], dim=-1)        
 
 
-        # Process through layers
+        # Process through layers with normalization
         for i, layer in enumerate(self.layers[:-1]):
-            x = torch.nn.functional.relu(layer(x))
-
-        rgbv = self.layers[-1](x)
-
-        rgb = torch.sigmoid(rgbv[..., :-1])
-
-        variance = torch.relu(rgbv[..., -1:])
+            x = layer(x)
+            x = torch.nn.functional.relu(x)
+        
+        out = self.layers[-1](x)
+        out = torch.nn.functional.sigmoid(out)
 
         if sample_idx is not None:
-            rgb = self.apply_color_transform(rgb, sample_idx)
+            out = self.apply_color_transform(out, sample_idx)
         
-        out = torch.cat([rgb, variance], dim=-1)
-
         transforms = [dx_list, dy_list] if dx_list is not None else None
 
         return out, transforms

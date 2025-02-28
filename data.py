@@ -6,7 +6,7 @@ from pathlib import Path
 import rawpy
 import pickle as pkl
 
-from utils import downsample_torch
+from utils import bilinear_resize_torch
 
 
 class SRData(torch.utils.data.Dataset):
@@ -34,16 +34,16 @@ class SRData(torch.utils.data.Dataset):
                 img_path = self.data_dir / self.transform_log[sample]['path']
                 img = cv2.imread(str(img_path))
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                self.images[sample] = torch.from_numpy(img).float() / 255.0
+                self.images[sample] = (torch.from_numpy(img).float() / 255.0).to("cuda:2")
 
         # Load original image for reference
         self.original = cv2.imread(str(self.data_dir / "hr_ground_truth.png"))
         self.original = cv2.cvtColor(self.original, cv2.COLOR_BGR2RGB)
-        self.original = torch.from_numpy(self.original).float() / 255.0
+        self.original = (torch.from_numpy(self.original).float() / 255.0).to("cuda:2")
 
         self.hr_coords = np.linspace(0, 1, self.original.shape[0], endpoint=False)
         self.hr_coords = np.stack(np.meshgrid(self.hr_coords, self.hr_coords), -1)
-        self.hr_coords = torch.FloatTensor(self.hr_coords)
+        self.hr_coords = torch.FloatTensor(self.hr_coords).to("cuda:2")
 
     def __len__(self):
         return len(self.samples)
@@ -82,9 +82,6 @@ class SRData(torch.utils.data.Dataset):
         """Return the original image (before any transformations)"""
         return self.original
     
-    def get_downsampled_original_hr(self):
-        """Return the downsampled original image"""
-        return downsample_torch(self.original, (self.original.shape[1] // 4, self.original.shape[2] // 4))
 
     def get_lr_sample(self, index):
         """Get a specific LR sample by index.
@@ -171,15 +168,53 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
         path = self.burst_dir / f"im_raw_{frame_idx:02d}.png"
         im = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         # Convert from 16-bit to float and normalize
-        im_t = (torch.from_numpy(im.astype(np.float32)) / (2**14)).float()
-        return im_t
+        im_t = im.astype(np.float32) / (2**14)
+
+        # Extract RGGB channels
+        R = im_t[..., 0]
+        G1 = im_t[..., 1]
+        G2 = im_t[..., 2]
+        B = im_t[..., 3]
+        
+        # Average the two green channels
+        G = (G1 + G2) / 2
+        
+        # Create RGB image
+        rgb = np.stack([R, G, B], axis=-1)
+        
+        # Apply white balance (example values, actual values might differ)
+        wb_gains = np.array([2.0, 1.0, 1.5])  # R, G, B gains
+        rgb = rgb * wb_gains
+        
+        # Apply gamma correction
+        gamma = 2.2
+        rgb = np.power(rgb, 1.0/gamma)
+        
+        # Clip values to [0, 1]
+        rgb = np.clip(rgb, 0, 1)
+
+        rgb = torch.from_numpy(rgb).float()
+        
+        return rgb
     
     def _read_gt_image(self):
         """Read the ground truth RGB image"""
         path = self.gt_dir / "im_rgb.png"
         gt = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         # Convert from 16-bit to float and normalize
-        gt_t = (torch.from_numpy(gt.astype(np.float32)) / 2**14).float()
+        gt_t = gt.astype(np.float32) / (2**14)
+
+        wb_gains = np.array([2.0, 1.0, 1.5])  # R, G, B gains
+        gt_t = gt_t * wb_gains
+
+        # Apply gamma correction
+        gamma = 2.2
+        gt_t = np.power(gt_t, 1.0/gamma)
+
+        gt_t = np.clip(gt_t, 0, 1)
+
+        gt_t = torch.from_numpy(gt_t).float()
+        
         return gt_t
     
     def __getitem__(self, idx):
@@ -228,9 +263,9 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
             # Make sure frame_idx is in range
             if frame_idx >= len(self.frame_indices):
                 frame_idx = 0
-            return self.burst_images[self.frame_indices[frame_idx]]
+            return self.burst_images[self.frame_indices[frame_idx]].permute(2, 0, 1)
         else:
-            return self._read_burst_image(self.frame_indices[frame_idx])
+            return self._read_burst_image(self.frame_indices[frame_idx]).permute(2, 0, 1)
     
     def get_hr_coordinates(self):
         """Return coordinates for the HR image"""

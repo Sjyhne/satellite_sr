@@ -24,14 +24,6 @@ import argparse
 
 import torch.fft
 
-class FrequencyLoss(nn.Module):
-    def forward(self, sr, hr):
-        sr_fft = torch.fft.fftn(sr, dim=(-2, -1))
-        hr_fft = torch.fft.fftn(hr, dim=(-2, -1))
-        return F.l1_loss(torch.abs(sr_fft), torch.abs(hr_fft))
-
-
-
 
 def visualize_masked_images(output, target, mask, iteration, save_dir='./mask_vis'):
     """Visualize the masked output and target images."""
@@ -316,7 +308,7 @@ def main():
     torch.backends.cudnn.benchmark = False
 
     device = torch.device(f"cuda:{args.d}" if torch.cuda.is_available() else "cpu")
-    network_size = (4, 128)
+    network_size = (4, 256)
     learning_rate = 5e-3
     iters = args.iters
     mapping_size = 128
@@ -333,7 +325,7 @@ def main():
         f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}",
     )
     
-    train_data = SyntheticBurstVal("SyntheticBurstVal", 1)
+    # train_data = SyntheticBurstVal("SyntheticBurstVal", 1)
 
     batch_size = args.bs
 
@@ -435,6 +427,8 @@ def main():
             if (i + 1) % 40 == 0:  # More frequent logging
                 with torch.no_grad():
                     test_loss, test_output, hr_image = test_one_epoch(model, train_data, device)
+
+                    print("ff_scale:", model.ff_scale.item())
 
                     test_output = einops.rearrange(test_output, 'b h w c -> b c h w')
                     hr_image = einops.rearrange(hr_image, 'b h w c -> b c h w')

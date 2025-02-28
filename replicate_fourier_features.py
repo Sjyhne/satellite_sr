@@ -7,6 +7,8 @@ from tqdm import tqdm
 import os
 import imageio.v2 as imageio
 
+import cv2
+
 # Set random seed for reproducibility
 torch.manual_seed(0)
 device = torch.device('cuda:6' if torch.cuda.is_available() else 'cpu')
@@ -15,13 +17,34 @@ device = torch.device('cuda:6' if torch.cuda.is_available() else 'cpu')
 image_url = 'https://live.staticflickr.com/7492/15677707699_d9d67acf9d_b.jpg'
 # img = imageio.imread(image_url)[..., :3] / 255.
 
-filename = "hr_image.png"
-img = imageio.imread(f"images/{filename}")[..., :3] / 255
-c = [img.shape[0]//2, img.shape[1]//2]
-r = 256
-img = img[c[0]-r:c[0]+r, c[1]-r:c[1]+r]
+path = "images/im_rgb.png"
+gt = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+# Convert from 16-bit to float and normalize
+gt_t = gt.astype(np.float32) / (2**14)
 
-every_other = True
+wb_gains = np.array([2.0, 1.0, 1.5])  # R, G, B gains
+gt_t = gt_t * wb_gains
+
+# Apply gamma correction
+gamma = 2.2
+gt_t = np.power(gt_t, 1.0/gamma)
+
+gt_t = np.clip(gt_t, 0, 1)
+
+# gt_t = torch.from_numpy(gt_t).float()
+
+
+# filename = "hr_image.png"
+# img = imageio.imread(f"images/{filename}")[..., :3] / 255
+# c = [img.shape[0]//2, img.shape[1]//2]
+# r = 256
+# img = img[c[0]-r:c[0]+r, c[1]-r:c[1]+r]
+
+every_other = False
+
+img = gt_t
+
+filename = "im_rgb.png"
 
 
 # Create input pixel coordinates in the unit square
@@ -116,6 +139,8 @@ B_dict = {}
 # B_dict['basic'] = torch.eye(2).to(device)
 # Three different scales of Gaussian Fourier feature mappings
 B_gauss = torch.randn(mapping_size, 2).to(device)
+(128, 2)
+
 for scale in [1, 5, 10]:
     B_dict[f'gauss_{scale}'] = B_gauss * scale
 

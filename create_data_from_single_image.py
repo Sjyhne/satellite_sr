@@ -5,7 +5,7 @@ import random
 import json
 import torch
 import torch.nn.functional as F
-from utils import apply_shift_torch, downsample_torch
+from utils import apply_shift_torch, bilinear_resize_torch
 import torchvision.transforms.functional as TF
 from torchvision import transforms
 
@@ -148,7 +148,7 @@ if __name__ == "__main__":
     hr_patch_size = 256   # Size of HR patches to extract
     
     # Multiple downsampling factors to generate
-    downsampling_factors = [4] # [1, 2, 4, 8]
+    downsampling_factors = [1, 4] # [1, 2, 4, 8]
     
     # Translation settings
     lr_pixel_shifts = [1] # [0.5, 1.0, 2.0, 4.0]  # Each will get its own dataset
@@ -268,7 +268,7 @@ if __name__ == "__main__":
                             )
                         
                         # 4. Downsample to LR
-                        shifted_lr = downsample_torch(shifted_patch, (hr_patch_size // factor, hr_patch_size // factor))
+                        shifted_lr = bilinear_resize_torch(shifted_patch, (hr_patch_size // factor, hr_patch_size // factor))
                         
                         # 5. Save LR sample
                         lr_np = (shifted_lr[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)

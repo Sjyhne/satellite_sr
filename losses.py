@@ -30,7 +30,7 @@ class BasicLosses(nn.Module):
         Returns:
             Average squared difference between predictions and targets
         """
-        return torch.square(pred - target)
+        return torch.square(pred - target).mean()
     
     @staticmethod
     def rmse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

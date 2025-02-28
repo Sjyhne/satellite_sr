@@ -39,8 +39,7 @@ def downsample_cv2(image, size):
     """Downsample using cv2 for data generation"""
     return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
 
-def downsample_torch(image, size, antialiasing=True):
-    """Downsample using torch for training"""
+def bilinear_resize_torch(image, size, antialiasing=True):
     return F.interpolate(image, size=size, mode='bilinear', align_corners=False, antialias=antialiasing)
 
 # from: https://gist.github.com/ProGamerGov/d032aa6780d8ef234f3ce67b177f3c14
