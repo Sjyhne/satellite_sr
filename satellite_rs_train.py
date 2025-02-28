@@ -13,7 +13,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR  # Change import
 import lpips  # Add at the top
 from torchmetrics.functional import structural_similarity_index_measure as ssim
 from torch.utils.data import DataLoader
-from data import SRData, SyntheticBurstVal
+from data import get_dataset
 import cv2
 from utils import apply_shift_torch, bilinear_resize_torch
 from coordinate_based_mlp import FourierNetwork
@@ -291,12 +291,22 @@ def main():
     parser.add_argument("--aug", type=str, default="none", 
                        choices=['none', 'light', 'medium', 'heavy'],
                        help="Augmentation level to use")
+    # Add dataset argument
+    parser.add_argument("--dataset", type=str, default="satburst_synth",
+                        choices=["satburst_synth", "worldstrat", "burst_synth"],
+                        help="Dataset implemented in data.get_dataset()")
+    parser.add_argument("--root_burst_synth", default="~/data/burst_synth", help="Set root of burst_synth")
+    parser.add_argument("--root_satburst_synth", default="~/data/satburst_synth", help="Set root of worldstrat dataset")
+    parser.add_argument("--root_worldstrat", default="~/data/worldstrat_kaggle", help="Set root of worldstrat dataset")
+    parser.add_argument("--area_name", type=str, default="UNHCR-LBNs006446", help="str: a sample name of worldstrat dataset")
+    parser.add_argument("--sample_id", type=int, default="1", help="int: a sample index of burst_synth")
+
 
     args = parser.parse_args()
 
     # set torch cuda device. note: do not set default_device to cuda:0
     if torch.cuda.is_available():
-        torch.cuda.set_device(f"cuda:{args.d}")  # current device is 1
+        torch.cuda.set_device(f"cuda:{args.d}")  
     device = torch.device(f"cuda:{args.d}" if torch.cuda.is_available() else "cpu")
     
     # Create base results directory
@@ -325,12 +335,12 @@ def main():
     results_dir.mkdir(parents=True, exist_ok=True)
     print(f"Saving results to: {results_dir}")
 
-    train_data = SRData(
-        f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}",
-    )
-    
-    # train_data = SyntheticBurstVal("SyntheticBurstVal", 1)
+    # Load the dataset
+    if args.dataset == "satburst_synth":
+        args.root_satburst_synth = f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}"
 
+    train_data = get_dataset(args=args, name=args.dataset)
+    
     batch_size = args.bs
 
     # initialize the dataloader here

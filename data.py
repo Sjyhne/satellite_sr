@@ -11,6 +11,18 @@ import tifffile
 from utils import bilinear_resize_torch
 
 
+def get_dataset(args, name='satburst', keep_in_memory=True):
+    """ Returns the dataset object based on the name """
+    if name == 'satburst_synth':
+        return SRData(data_dir=args.root_satburst_synth, keep_in_memory=keep_in_memory)
+    elif name == 'burst_synth':
+        return SyntheticBurstVal(data_dir=args.root_burst_synth, sample_id=args.sample_id, keep_in_memory=keep_in_memory)
+    elif name == 'worldstrat':
+        return WorldStratDatasetFrame(data_dir=args.root_worldstrat, area_name=args.area_name)
+    else:
+        raise ValueError(f"Invalid daaset name: {name}")
+
+
 class SRData(torch.utils.data.Dataset):
     def __init__(self, data_dir, keep_in_memory=True):
         """
@@ -286,16 +298,16 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
 
 class WorldStratDatasetFrame(torch.utils.data.Dataset):
     """ Returns single LR frames in getitem """
-    def __init__(self, dataset_root, area_name="UNHCR-LBNs006446", num_frames=8):
+    def __init__(self, data_dir, area_name="UNHCR-LBNs006446", num_frames=8):
         """
         Args:
-            dataset_root (str): Path to the dataset.
+            data_dir (str): Path to the dataset.
             area_name (str): area name.
         """
 
         self.dataset_root = '/home/nlang/data/worldstrat_kaggle'
-        self.hr_dataset = "{}/hr_dataset/12bit".format(dataset_root)
-        self.lr_dataset = "{}/lr_dataset".format(dataset_root)
+        self.hr_dataset = "{}/hr_dataset/12bit".format(data_dir)
+        self.lr_dataset = "{}/lr_dataset".format(data_dir)
         #self.metadata_df = pd.read_csv("{}/metadata.csv".format(dataset_root))
 
         self.area_name = area_name
@@ -381,7 +393,7 @@ class WorldStratDatasetFrame(torch.utils.data.Dataset):
         Returns:
             Tensor of shape [C, H, W] with values in [0, 1]
         """
-        return self.get_lr(index)
+        return self.get_lr(index).permute(2, 0, 1)
     
 
 if __name__ == "__main__":
