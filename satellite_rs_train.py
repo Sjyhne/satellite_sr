@@ -13,13 +13,24 @@ from torch.optim.lr_scheduler import CosineAnnealingLR  # Change import
 import lpips  # Add at the top
 from torchmetrics.functional import structural_similarity_index_measure as ssim
 from torch.utils.data import DataLoader
-from data import SRData, SyntheticBurstVal, WorldStratDatasetFrame
+from data import SRData, SyntheticBurstVal
 import cv2
-from utils import apply_shift_torch, downsample_torch
+from utils import apply_shift_torch, bilinear_resize_torch
 from coordinate_based_mlp import FourierNetwork
-from losses import BasicLosses
+from losses import BasicLosses, AdvancedLosses, CharbonnierLoss, RelativeLosses
 
+import einops
 import argparse
+
+import torch.fft
+
+class FrequencyLoss(nn.Module):
+    def forward(self, sr, hr):
+        sr_fft = torch.fft.fftn(sr, dim=(-2, -1))
+        hr_fft = torch.fft.fftn(hr, dim=(-2, -1))
+        return F.l1_loss(torch.abs(sr_fft), torch.abs(hr_fft))
+
+
 
 
 def visualize_masked_images(output, target, mask, iteration, save_dir='./mask_vis'):
@@ -68,7 +79,7 @@ def visualize_masked_images(output, target, mask, iteration, save_dir='./mask_vi
     plt.savefig(save_path)
     plt.close()
 
-def train_one_epoch(model, optimizer, train_loader, device, iteration=0, use_gt=False):
+def train_one_iteration(model, optimizer, train_sample, device, iteration=0, use_gt=False):
     model.train()
 
     # Initialize loss functions
@@ -83,66 +94,42 @@ def train_one_epoch(model, optimizer, train_loader, device, iteration=0, use_gt=
     gt_dxs = []
     gt_dys = []
 
-    for sample in train_loader:
-        input = sample['input'].to(device)
-        lr_target = sample['lr_target'].to(device)
-        sample_id = sample['sample_id'].to(device)
-        
-        # Handle the case where shifts might not be present in the dataset
-        if 'shifts' in sample and 'dx_percent' in sample['shifts']:
-            gt_dx = sample['shifts']['dx_percent'].to(device)
-            gt_dy = sample['shifts']['dy_percent'].to(device)
-        else:
-            # Default to zeros if shifts aren't available
-            gt_dx = torch.zeros(lr_target.shape[0], device=device)
-            gt_dy = torch.zeros(lr_target.shape[0], device=device)
+    input = train_sample['input'].to(device)
+    lr_target = train_sample['lr_target'].to(device)
+    sample_id = train_sample['sample_id'].to(device)
 
-        optimizer.zero_grad()
+    if 'shifts' in train_sample and 'dx_percent' in train_sample['shifts']:
+        gt_dx = train_sample['shifts']['dx_percent'].to(device)
+        gt_dy = train_sample['shifts']['dy_percent'].to(device)
+    else:
+        gt_dx = torch.zeros(lr_target.shape[0], device=device)
+        gt_dy = torch.zeros(lr_target.shape[0], device=device)
 
-        output, pred_shifts = model(input, sample_id)
-        
-        # Extract variance and output
-        variance = torch.exp(output[..., -1:])
-        output = output[..., :-1]
-        
-        # Downsample to match target resolution
-        output = downsample_torch(output.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
-        variance = downsample_torch(variance.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
+    optimizer.zero_grad()
 
-        # Calculate reconstruction loss - ensure it's a scalar
-        recon_loss = recon_criterion(output, lr_target)
-        
-        # Calculate translation loss
-        pred_dx, pred_dy = pred_shifts
-        trans_loss = trans_criterion(pred_dx, gt_dx) + trans_criterion(pred_dy, gt_dy)
-        
-        # Combine losses and backpropagate
-        recon_loss.backward()
-        optimizer.step()
-        
-        # Track metrics
-        epoch_recon_loss += recon_loss.item()
-        epoch_trans_loss += trans_loss.item()
-        
-        # Store predictions for visualization
-        pred_dxs.extend(pred_dx.detach().cpu().numpy())
-        pred_dys.extend(pred_dy.detach().cpu().numpy())
-        gt_dxs.extend(gt_dx.detach().cpu().numpy())
-        gt_dys.extend(gt_dy.detach().cpu().numpy())
+    output, pred_shifts = model(input, sample_id)
     
-    # Calculate average losses
-    epoch_recon_loss /= len(train_loader)
-    epoch_trans_loss /= len(train_loader)
-    epoch_total_loss = epoch_recon_loss + epoch_trans_loss
+    # Downsample to match target resolution
+    output = bilinear_resize_torch(output.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
 
+    # Calculate reconstruction loss - ensure it's a scalar
+    recon_loss = recon_criterion(output, lr_target)
+    
+    pred_dx, pred_dy = pred_shifts
+    trans_loss = trans_criterion(pred_dx, gt_dx) + trans_criterion(pred_dy, gt_dy)
+    
+    # Only backpropagate the reconstruction loss
+    recon_loss.backward()
+    optimizer.step()
+    
     return {
-        'recon_loss': epoch_recon_loss,
-        'trans_loss': epoch_trans_loss,
-        'total_loss': epoch_total_loss,
-        'pred_dx': pred_dxs,
-        'pred_dy': pred_dys,
-        'gt_dx': gt_dxs,
-        'gt_dy': gt_dys
+        'recon_loss': recon_loss.item(),
+        'trans_loss': trans_loss.item(),
+        'total_loss': recon_loss.item() + trans_loss.item(),
+        'pred_dx': pred_dx.detach().cpu().numpy(),
+        'pred_dy': pred_dy.detach().cpu().numpy(),
+        'gt_dx': gt_dx.detach().cpu().numpy(),
+        'gt_dy': gt_dy.detach().cpu().numpy()
     }
 
 def test_one_epoch(model, test_loader, device):
@@ -150,84 +137,56 @@ def test_one_epoch(model, test_loader, device):
 
     # Get HR features from the test loader
     hr_coords = test_loader.get_hr_coordinates().unsqueeze(0).to(device)
-    img = test_loader.get_original_hr().unsqueeze(0).to(device)
-    
-    # Add sample_idx=0 for test/inference
+    hr_image = test_loader.get_original_hr().unsqueeze(0).to(device)
     sample_id = torch.tensor([0]).to(device)
+    
     output, _ = model(hr_coords, sample_id)
 
-    # Handle case where output is (output, mask) tuple
-    if isinstance(output, tuple):
-        output, _ = output
-
-    # Remove variance channel
-    output = output[..., :-1]
+    loss = F.mse_loss(output, hr_image)
     
-    # Convert RGGB to RGB if needed
-    if output.shape[-1] == 4 and img.shape[-1] == 3:
-        R = output[..., 0]
-        G = (output[..., 1] + output[..., 2]) / 2
-        B = output[..., 3]
-        output = torch.stack([R, G, B], dim=-1)
-    
-    # Calculate loss
-    loss = F.mse_loss(output, img)
+    return loss.item(), output.detach(), hr_image.detach()
 
-    return loss.item(), output.detach().cpu().numpy(), img.detach().cpu().numpy()
 
 
 def visualize_translations(pred_dx, pred_dy, target_dx, target_dy, save_path='translation_vis.png'):
-    """Create a visualization comparing predicted and target translations."""
-    plt.figure(figsize=(10, 10))
+    """Create a simple visualization comparing predicted and target translations."""
+    plt.figure(figsize=(10, 8))
     
-    # Ensure we're working with flattened tensors
-    pred_dx = pred_dx.squeeze()  # Remove any extra dimensions
-    pred_dy = pred_dy.squeeze()
-    target_dx = target_dx.squeeze()
-    target_dy = target_dy.squeeze()
+    # Set up the plot with a light gray background grid
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    plt.axvline(x=0, color='black', linestyle='-', alpha=0.5)
     
-    # Plot target translations
-    plt.scatter(target_dx, target_dy, c='blue', label='Target', alpha=0.6)
+    # Plot target points (blue circles)
+    plt.scatter(target_dx, target_dy, c='blue', s=90, label='Target', alpha=0.7)
     
-    # Plot predicted translations
-    plt.scatter(pred_dx, pred_dy, c='red', label='Predicted', alpha=0.6)
+    # Plot predicted points (red x's)
+    plt.scatter(pred_dx, pred_dy, c='red', s=90, label='Predicted', marker='x', alpha=0.7)
     
-    # Draw lines connecting corresponding points and add annotations
-    # check if pred_dx has a length
-    if pred_dx.dim() > 0:
-        for i in range(len(pred_dx)):
-            # Draw connection line
-            plt.plot([target_dx[i], pred_dx[i]], 
-                    [target_dy[i], pred_dy[i]], 
-                    'gray', alpha=0.3)
-            
-            # Add sample index annotations
-            # For target point
-            plt.annotate(f'{i:02d}', 
-                        (target_dx[i], target_dy[i]),
-                        xytext=(5, 5), textcoords='offset points',
-                        color='blue', fontsize=8)
-            
-            # For predicted point
-            plt.annotate(f'{i:02d}', 
-                        (pred_dx[i], pred_dy[i]),
-                        xytext=(5, 5), textcoords='offset points',
-                        color='red', fontsize=8)
+    # Connect corresponding points with gray lines
+    for i in range(len(target_dx)):
+        plt.plot([target_dx[i], pred_dx[i]], [target_dy[i], pred_dy[i]], 'gray', alpha=0.5)
+        
+        # Add sample number next to the target point with larger font and background
+        plt.text(target_dx[i], target_dy[i], f' {i}', 
+                fontsize=10,  # Increased font size
+                fontweight='normal'  # Make the text bold
+                )
     
     # Add labels and title
-    plt.xlabel('Translation X')
-    plt.ylabel('Translation Y')
-    plt.title(f'Predicted vs Target Translations\n(Numbers indicate sample indices)')
-    plt.legend()
+    plt.xlabel('X Translation')
+    plt.ylabel('Y Translation')
+    plt.title('Target vs. Predicted Translations')
+    plt.legend(loc='upper right')
     
-    # Add grid
-    plt.grid(True, alpha=0.3)
-    
-    # Make axes equal to preserve translation proportions
+    # Make sure the aspect ratio is equal
     plt.axis('equal')
     
-    # Save the plot
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    # Add a bit of padding around the points
+    plt.tight_layout()
+    
+    # Save the figure
+    plt.savefig(save_path, dpi=150)
     plt.close()
 
 def calculate_metrics(pred, target):
@@ -333,13 +292,13 @@ def main():
     parser.add_argument("--iters", type=int, default=1000)
     parser.add_argument("--df", type=int, default=4)
     parser.add_argument("--lr_shift", type=float, default=0.5)
+    parser.add_argument("--bs", type=int, default=2)
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--use_gt", type=bool, default=False)
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument("--aug", type=str, default="none", 
                        choices=['none', 'light', 'medium', 'heavy'],
                        help="Augmentation level to use")
-    parser.add_argument("--root_worldstrat", type=str, default="/home/nlang/data/worldstrat_kaggle")
 
     args = parser.parse_args()
 
@@ -370,17 +329,18 @@ def main():
     results_dir.mkdir(parents=True, exist_ok=True)
     print(f"Saving results to: {results_dir}")
 
-    train_data = SRData(f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}")
-    # train_data = WorldStratDatasetFrame(dataset_root=args.root_worldstrat, area_name="UNHCR-LBNs006446")
-    # train_data = SyntheticBurstVal("SyntheticBurstVal", 0)
+    train_data = SRData(
+        f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}",
+    )
     
+    train_data = SyntheticBurstVal("SyntheticBurstVal", 1)
 
-    batch_size = len(train_data)
+    batch_size = args.bs
 
     # initialize the dataloader here
     train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
 
-    model = FourierNetwork(mapping_size * 2, *network_size, len(train_data), rggb=False).to(device)
+    model = FourierNetwork(mapping_size, *network_size, len(train_data), rggb=False).to(device)
 
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = CosineAnnealingLR(optimizer, T_max=iters, eta_min=1e-6)
@@ -446,116 +406,183 @@ def main():
             'ssim': ssim_value.item()
         }
 
-    for i, _ in tqdm(enumerate(range(iters)), total=iters):
-        train_losses = train_one_epoch(model, optimizer, train_dataloader, device, iteration=i+1, use_gt=args.use_gt)
-        
-        # Regular step (no need to pass iteration number)
-        scheduler.step()
-        
-        if (i + 1) % 100 == 0:  # More frequent logging
-            test_loss, test_output, test_img = test_one_epoch(model, train_data, device)
+    i = 0
+    aggregate_train_losses = {}
+    
+    # Create a tqdm progress bar for the entire training
+    progress_bar = tqdm(total=iters, desc="Training")
+    
+    while i < iters:
+        for train_sample in train_dataloader:
+            train_losses = train_one_iteration(model, optimizer, train_sample, device, iteration=i+1, use_gt=args.use_gt)
+            scheduler.step()
+            i += 1
+
+            for key, value in train_losses.items():
+                if key not in aggregate_train_losses:
+                    aggregate_train_losses[key] = []
+                aggregate_train_losses[key].append(value)
             
-            # Convert test outputs to correct format
-            test_output_tensor = torch.from_numpy(test_output[0]).permute(2, 0, 1).unsqueeze(0).to(device)
-            test_img_tensor = torch.from_numpy(test_img[0]).permute(2, 0, 1).unsqueeze(0).to(device)
-            
-            # Calculate metrics for model output
-            model_metrics = calculate_metrics(test_output_tensor, test_img_tensor)
-            
-            # Calculate metrics for baseline
-            hr_img = test_img_tensor
-            downsampled = downsample_torch(hr_img, 
-                                         (hr_img.shape[2]//downsample_factor, 
-                                          hr_img.shape[3]//downsample_factor))
-            upsampled = F.interpolate(downsampled, 
-                                    size=(hr_img.shape[2], hr_img.shape[3]), 
-                                    mode='bilinear', 
-                                    align_corners=False)
-            baseline_metrics = calculate_metrics(upsampled, hr_img)
-            
-            # Store values in history
-            history['iterations'].append(i + 1)
-            history['recon_loss'].append(train_losses['recon_loss'])
-            history['trans_loss'].append(train_losses['trans_loss'])
-            history['test_loss'].append(test_loss)
-            history['psnr'].append(model_metrics['psnr'])
-            history['lpips'].append(model_metrics['lpips'])
-            history['ssim'].append(model_metrics['ssim'])
-            history['baseline_psnr'].append(baseline_metrics['psnr'])
-            history['baseline_lpips'].append(baseline_metrics['lpips'])
-            history['baseline_ssim'].append(baseline_metrics['ssim'])
-            # Store translation data
-            history['translation_data'].append({
-                'pred_dx': train_losses['pred_dx'],
-                'pred_dy': train_losses['pred_dy'],
-                'target_dx': train_losses['gt_dx'],
-                'target_dy': train_losses['gt_dy'],
+            # Update the progress bar
+            progress_bar.update(1)
+            progress_bar.set_postfix({
+                'recon_loss': f"{train_losses['recon_loss']:.4f}",
+                'trans_loss': f"{train_losses['trans_loss']:.4f}"
             })
+            
+            
+            
+            if (i + 1) % 40 == 0:  # More frequent logging
+                with torch.no_grad():
+                    test_loss, test_output, hr_image = test_one_epoch(model, train_data, device)
 
-            # Store learning rates in history
-            history['learning_rate'].append(scheduler.get_last_lr()[0])
+                    test_output = einops.rearrange(test_output, 'b h w c -> b c h w')
+                    hr_image = einops.rearrange(hr_image, 'b h w c -> b c h w')
 
-            # Print all metrics
-            print(f"Iter {i+1}: "
-                  f"Train recon: {train_losses['recon_loss']:.6f}, "
-                  f"trans: {train_losses['trans_loss']:.6f}, "
-                  f"total: {train_losses['total_loss']:.6f}, "
-                  f"Test: {test_loss:.6f}\n"
-                  f"Metrics vs Baseline:\n"
-                  f"PSNR: {model_metrics['psnr']:.2f}dB vs {baseline_metrics['psnr']:.2f}dB\n"
-                  f"LPIPS: {model_metrics['lpips']:.4f} vs {baseline_metrics['lpips']:.4f} (lower is better)\n"
-                  f"SSIM: {model_metrics['ssim']:.4f} vs {baseline_metrics['ssim']:.4f} (higher is better)")
+                    # Calculate metrics for model output
+                    model_metrics = calculate_metrics(test_output, hr_image)
+                    
+                    lr_sample = train_data.get_lr_sample(0).unsqueeze(0).to(device)
 
-            if args.wandb:
-                wandb.log({
-                    "iteration": i + 1,
-                    "train/recon_loss": train_losses['recon_loss'],
-                    "train/trans_loss": train_losses['trans_loss'],
-                    "train/total_loss": train_losses['total_loss'],
-                    "test/loss": test_loss,
-                    "test/psnr": model_metrics['psnr'],
-                    "test/lpips": model_metrics['lpips'],
-                    "test/ssim": model_metrics['ssim'],
-                    "test/baseline_psnr": baseline_metrics['psnr'],
-                    "test/baseline_lpips": baseline_metrics['lpips'],
-                    "test/baseline_ssim": baseline_metrics['ssim'],
-                    "learning_rate": scheduler.get_last_lr()[0],
-                    "metrics/psnr_improvement": model_metrics['psnr'] - baseline_metrics['psnr'],
-                    "metrics/lpips_improvement": baseline_metrics['lpips'] - model_metrics['lpips'],
-                    "metrics/ssim_improvement": model_metrics['ssim'] - baseline_metrics['ssim'],
-                })
+                    baseline_pred = bilinear_resize_torch(lr_sample, (hr_image.shape[2], hr_image.shape[3]))
+
+                    baseline_metrics = calculate_metrics(baseline_pred, hr_image)
+                
+                # Store values in history
+                history['iterations'].append(i + 1)
+                history['recon_loss'].append(aggregate_train_losses['recon_loss'][-1])
+                history['trans_loss'].append(aggregate_train_losses['trans_loss'][-1])
+                history['test_loss'].append(test_loss)
+                history['psnr'].append(model_metrics['psnr'])
+                history['lpips'].append(model_metrics['lpips'])
+                history['ssim'].append(model_metrics['ssim'])
+                history['baseline_psnr'].append(baseline_metrics['psnr'])
+                history['baseline_lpips'].append(baseline_metrics['lpips'])
+                history['baseline_ssim'].append(baseline_metrics['ssim'])
+
+                translation_data = []
+                for idx in range(len(train_data)):
+                    gt_shift = train_data[idx]['shifts']
+                    pred_shift = model.transform_vectors[idx]
+
+                    gt_dx = gt_shift["dx_percent"]
+                    gt_dy = gt_shift["dy_percent"]
+
+                    pred_dy = pred_shift[1]
+                    pred_dx = pred_shift[0]
+
+                    translation_data.append({
+                        'target_dx': gt_dx,
+                        'target_dy': gt_dy,
+                        'pred_dx': pred_dx.detach().cpu().numpy(),
+                        'pred_dy': pred_dy.detach().cpu().numpy(),
+                    })
+
+                # Store all translations for this iteration
+                history['translation_data'].append(translation_data)
+
+                # Store learning rates in history
+                history['learning_rate'].append(scheduler.get_last_lr()[0])
+
+                # Print all metrics
+                print(f"Iter {i+1}: "
+                    f"Train recon: {aggregate_train_losses['recon_loss'][-1]:.6f}, "
+                    f"trans: {aggregate_train_losses['trans_loss'][-1]:.6f}, "
+                    f"total: {aggregate_train_losses['total_loss'][-1]:.6f}, "
+                    f"Test: {test_loss:.6f}\n"
+                    f"Metrics vs Baseline:\n"
+                    f"PSNR: {model_metrics['psnr']:.2f}dB vs {baseline_metrics['psnr']:.2f}dB\n"
+                    f"LPIPS: {model_metrics['lpips']:.4f} vs {baseline_metrics['lpips']:.4f} (lower is better)\n"
+                    f"SSIM: {model_metrics['ssim']:.4f} vs {baseline_metrics['ssim']:.4f} (higher is better)")
+
+                if args.wandb:
+                    wandb.log({
+                        "iteration": i + 1,
+                        "train/recon_loss": aggregate_train_losses['recon_loss'][-1],
+                        "train/trans_loss": aggregate_train_losses['trans_loss'][-1],
+                        "train/total_loss": aggregate_train_losses['total_loss'][-1],
+                        "test/loss": test_loss,
+                        "test/psnr": model_metrics['psnr'],
+                        "test/lpips": model_metrics['lpips'],
+                        "test/ssim": model_metrics['ssim'],
+                        "test/baseline_psnr": baseline_metrics['psnr'],
+                        "test/baseline_lpips": baseline_metrics['lpips'],
+                        "test/baseline_ssim": baseline_metrics['ssim'],
+                        "learning_rate": scheduler.get_last_lr()[0],
+                        "metrics/psnr_improvement": model_metrics['psnr'] - baseline_metrics['psnr'],
+                        "metrics/lpips_improvement": baseline_metrics['lpips'] - model_metrics['lpips'],
+                        "metrics/ssim_improvement": model_metrics['ssim'] - baseline_metrics['ssim'],
+                    })
+
+                # Update progress bar description with current metrics
+                progress_bar.set_description(
+                    f"Train: {aggregate_train_losses['recon_loss'][-1]:.4f} | "
+                    f"PSNR: {model_metrics['psnr']:.2f}dB"
+                )
+                
+                aggregate_train_losses = {}
+
+            # Break if we've reached the desired number of iterations
+            if i >= iters:
+                break
+    
+    # Close the progress bar
+    progress_bar.close()
 
     # Create all visualizations at the end
     # Training curves
     plot_training_curves(history, save_path=results_dir / 'final_training_curves.png')
     
     # Translation visualization (using last iteration's data)
-    last_trans_data = history['translation_data'][-1]
+    last_trans_data = history['translation_data'][-1]  # Get the last iteration's data
+
+    # Extract all translation data
+    pred_dx_list = []
+    pred_dy_list = []
+    target_dx_list = []
+    target_dy_list = []
+
+    for sample_data in last_trans_data:
+        # Extract values and convert to float
+        pred_dx_list.append(float(sample_data['pred_dx']))
+        pred_dy_list.append(float(sample_data['pred_dy']))
+        target_dx_list.append(float(sample_data['target_dx']))
+        target_dy_list.append(float(sample_data['target_dy']))
+
+    # Convert to numpy arrays
+    pred_dx_array = np.array(pred_dx_list)
+    pred_dy_array = np.array(pred_dy_list)
+    target_dx_array = np.array(target_dx_list)
+    target_dy_array = np.array(target_dy_list)
+
+    # Visualize translations
     visualize_translations(
-        torch.tensor(last_trans_data['pred_dx']),
-        torch.tensor(last_trans_data['pred_dy']),
-        torch.tensor(last_trans_data['target_dx']),
-        torch.tensor(last_trans_data['target_dy']),
+        pred_dx_array,
+        pred_dy_array,
+        target_dx_array,
+        target_dy_array,
         save_path=results_dir / 'final_translation_vis.png'
     )
 
-    # Final test and visualization
-    test_loss, test_output, test_img = test_one_epoch(model, train_data, device)
-    
+
     # Create downsampled then upsampled version for comparison
     with torch.no_grad():
-        hr_img = torch.from_numpy(test_img[0]).to(device)
-        downsampled = downsample_torch(hr_img.permute(2, 0, 1).unsqueeze(0), 
-                                     (hr_img.shape[0]//downsample_factor, hr_img.shape[1]//downsample_factor))
-        upsampled = downsample_torch(downsampled, (hr_img.shape[0], hr_img.shape[1]))
-        upsampled = upsampled[0].permute(1, 2, 0).cpu().numpy()
-        
+
+        # Final test and visualization
+        test_loss, test_output, hr_image = test_one_epoch(model, train_data, device)
+        lr_sample = train_data.get_lr_sample(0).unsqueeze(0).to(device)
+
+        test_output = einops.rearrange(test_output, 'b h w c -> b c h w')
+        hr_image = einops.rearrange(hr_image, 'b h w c -> b c h w')
+
+        baseline_pred = bilinear_resize_torch(lr_sample, (hr_image.shape[2], hr_image.shape[3]))
+
         # Calculate PSNR for model output
-        mse_model = F.mse_loss(torch.tensor(test_output[0]), torch.tensor(test_img[0]))
+        mse_model = F.mse_loss(test_output, hr_image)
         psnr_model = -10 * torch.log10(mse_model)
         
         # Calculate PSNR for baseline
-        mse_baseline = F.mse_loss(torch.tensor(upsampled), torch.tensor(test_img[0]))
+        mse_baseline = F.mse_loss(baseline_pred, hr_image)
         psnr_baseline = -10 * torch.log10(mse_baseline)
     
     # Get LR target image (use sample_00 as it matches the HR ground truth)
@@ -578,12 +605,16 @@ def main():
         
         # Convert to numpy for plotting
         lr_target_img = lr_target_img.numpy()
+    
+    hr_image = hr_image.cpu().permute(0, 2, 3, 1).numpy()
+    baseline_pred = baseline_pred.cpu().permute(0, 2, 3, 1).numpy()
+    test_output = test_output.cpu().permute(0, 2, 3, 1).numpy()
 
     # Create side by side visualization
     plt.figure(figsize=(24, 6))
     
     plt.subplot(1, 4, 1)
-    plt.imshow(test_img[0])
+    plt.imshow(hr_image[0])
     plt.title('HR GT')
     plt.axis('off')
     
@@ -593,7 +624,7 @@ def main():
     plt.axis('off')
     
     plt.subplot(1, 4, 3)
-    plt.imshow(upsampled)
+    plt.imshow(baseline_pred[0])
     plt.title(f'Bilinear\nPSNR: {psnr_baseline:.2f} dB')
     plt.axis('off')
     
