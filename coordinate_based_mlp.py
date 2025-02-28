@@ -64,7 +64,7 @@ class FourierNetwork(nn.Module):
         self.input_dim = input_dim
         self.coordinate_dim = coordinate_dim
 
-        self.ff_scale = nn.Parameter(torch.ones(1) * 3) 
+        self.ff_scale = torch.tensor(10.) #nn.Parameter(torch.ones(1) * 10) 
 
         # create decoder MLP
         self.layers = nn.ModuleList()
