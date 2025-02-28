@@ -294,6 +294,11 @@ def main():
 
     args = parser.parse_args()
 
+    # set torch cuda device. note: do not set default_device to cuda:0
+    if torch.cuda.is_available():
+        torch.cuda.set_device(f"cuda:{args.d}")  # current device is 1
+    device = torch.device(f"cuda:{args.d}" if torch.cuda.is_available() else "cpu")
+    
     # Create base results directory
     Path('results').mkdir(exist_ok=True)
 
@@ -307,7 +312,6 @@ def main():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    device = torch.device(f"cuda:{args.d}" if torch.cuda.is_available() else "cpu")
     network_size = (4, 256)
     learning_rate = 5e-3
     iters = args.iters

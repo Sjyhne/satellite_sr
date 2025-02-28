@@ -36,16 +36,16 @@ class SRData(torch.utils.data.Dataset):
                 img_path = self.data_dir / self.transform_log[sample]['path']
                 img = cv2.imread(str(img_path))
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                self.images[sample] = (torch.from_numpy(img).float() / 255.0).to("cuda:2")
+                self.images[sample] = (torch.from_numpy(img).float() / 255.0).cuda()
 
         # Load original image for reference
         self.original = cv2.imread(str(self.data_dir / "hr_ground_truth.png"))
         self.original = cv2.cvtColor(self.original, cv2.COLOR_BGR2RGB)
-        self.original = (torch.from_numpy(self.original).float() / 255.0).to("cuda:2")
+        self.original = (torch.from_numpy(self.original).float() / 255.0).cuda()
 
         self.hr_coords = np.linspace(0, 1, self.original.shape[0], endpoint=False)
         self.hr_coords = np.stack(np.meshgrid(self.hr_coords, self.hr_coords), -1)
-        self.hr_coords = torch.FloatTensor(self.hr_coords).to("cuda:2")
+        self.hr_coords = torch.FloatTensor(self.hr_coords).cuda()
 
     def __len__(self):
         return len(self.samples)
