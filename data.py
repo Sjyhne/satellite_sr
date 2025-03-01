@@ -16,9 +16,11 @@ def get_dataset(args, name='satburst', keep_in_memory=True):
     if name == 'satburst_synth':
         return SRData(data_dir=args.root_satburst_synth, keep_in_memory=keep_in_memory)
     elif name == 'burst_synth':
-        return SyntheticBurstVal(data_dir=args.root_burst_synth, sample_id=args.sample_id, keep_in_memory=keep_in_memory)
+        return SyntheticBurstVal(data_dir=args.root_burst_synth, 
+                                 sample_id=args.sample_id, keep_in_memory=keep_in_memory)
     elif name == 'worldstrat':
-        return WorldStratDatasetFrame(data_dir=args.root_worldstrat, area_name=args.area_name)
+        return WorldStratDatasetFrame(data_dir=args.root_worldstrat, 
+                                      area_name=args.area_name, hr_size=args.worldstrat_hr_size)
     else:
         raise ValueError(f"Invalid daaset name: {name}")
 
@@ -298,7 +300,7 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
 
 class WorldStratDatasetFrame(torch.utils.data.Dataset):
     """ Returns single LR frames in getitem """
-    def __init__(self, data_dir, area_name="UNHCR-LBNs006446", num_frames=8):
+    def __init__(self, data_dir, area_name="UNHCR-LBNs006446", num_frames=8, hr_size=None):
         """
         Args:
             data_dir (str): Path to the dataset.
@@ -312,11 +314,12 @@ class WorldStratDatasetFrame(torch.utils.data.Dataset):
 
         self.area_name = area_name
         self.num_frames = num_frames    
-        self.hr_img_size = 512
+        self.hr_size = hr_size
 
         # Load high-resolution image
         self.hr_image = self.get_hr()   # Shape: (hr_img_size, hr_img_size, 3)
-        self.hr_image = cv2.resize(self.hr_image, (self.hr_img_size, self.hr_img_size))
+        if self.hr_size is not None:
+            self.hr_image = cv2.resize(self.hr_image, (self.hr_size, self.hr_size), interpolation=cv2.INTER_AREA)
         self.hr_image = torch.tensor(self.hr_image)
         
 
