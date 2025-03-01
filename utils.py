@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import cv2
 import numpy as np
 from typing import Tuple
+from scipy.signal import correlate2d
 
 
 def apply_shift_cv2(image, dx, dy):
@@ -152,5 +153,124 @@ def color_transfer(
 
 
 
+
+def align_spatial(input: torch.Tensor, reference: torch.Tensor, mode: str = "ECC") -> torch.Tensor:
+    """
+    Aligns input to reference using Enhanced Correlation Coefficient (ECC) maximization.
+    
+    Args:
+        input (torch.Tensor): First image (to be aligned), shape (3, H, W) for RGB
+        reference (torch.Tensor): Reference image, shape (3, H, W) for RGB
+        mode (str): Alignment method ("ECC" for affine transformation)
+    
+    Returns:
+        torch.Tensor: Aligned image tensor with the same shape as reference
+    """
+    if mode != "ECC":
+        raise NotImplementedError(f"Mode '{mode}' is not implemented.")
+    
+    # Convert tensors to numpy arrays
+    input_np = (input.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    reference_np = (reference.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    
+    # Convert to grayscale for ECC alignment
+    input_gray = cv2.cvtColor(input_np, cv2.COLOR_RGB2GRAY)
+    reference_gray = cv2.cvtColor(reference_np, cv2.COLOR_RGB2GRAY)
+    
+    # Define motion model (Affine Transformation)
+    warp_mode = cv2.MOTION_AFFINE
+    warp_matrix = np.eye(2, 3, dtype=np.float32)
+    
+    # Set termination criteria: max iterations or convergence threshold
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 5000, 1e-10)
+    
+    # Apply ECC algorithm to find the warp matrix
+    _, warp_matrix = cv2.findTransformECC(reference_gray, input_gray, warp_matrix, warp_mode, criteria)
+    
+    # Warp the input image to align with the reference
+    aligned_img_np = cv2.warpAffine(input_np, warp_matrix, (reference_np.shape[1], reference_np.shape[0]),
+                                    flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
+    
+    # Convert back to torch tensor
+    aligned_img_tensor = torch.tensor(aligned_img_np, dtype=torch.float32) / 255.0  # Normalize
+    aligned_img_tensor = aligned_img_tensor.permute(2, 0, 1)  # Convert back to (C, H, W)
+    
+    return aligned_img_tensor
+
+
+def align_spectral(input: torch.Tensor, reference: torch.Tensor, mode: str = "shift_scale") -> torch.Tensor:
+    """
+    Adjusts the channel-wise color shift and scale to match the reference image.
+    
+    Args:
+        input (torch.Tensor): First image (to be aligned), shape (3, H, W) for RGB
+        reference (torch.Tensor): Reference image, shape (3, H, W) for RGB
+        mode (str): Alignment method (only "shift_scale" is implemented)
+    
+    Returns:
+        torch.Tensor: Color-aligned image tensor with the same shape as reference
+    """
+    if mode != "shift_scale":
+        raise NotImplementedError(f"Mode '{mode}' is not implemented.")
+    
+    # Compute per-channel mean and standard deviation
+    input_mean, input_std = input.mean(dim=(1, 2), keepdim=True), input.std(dim=(1, 2), keepdim=True)
+    reference_mean, reference_std = reference.mean(dim=(1, 2), keepdim=True), reference.std(dim=(1, 2), keepdim=True)
+    
+    # Adjust input to match reference statistics
+    adjusted_input = (input - input_mean) / (input_std + 1e-6) * reference_std + reference_mean
+    
+    return adjusted_input
+
+def align_output_to_target(input: torch.Tensor, reference: torch.Tensor, 
+                           spectral: bool = True, spatial: bool = True) -> torch.Tensor:
+    """
+    Aligns an image to a reference by first adjusting spectral properties (color shift and scale),
+    then aligning spatially using ORB feature matching.
+    
+    Args:
+        input (torch.Tensor): First image (to be aligned), shape (3, H, W) for RGB
+        reference (torch.Tensor): Reference image, shape (3, H, W) for RGB
+    
+    Returns:
+        torch.Tensor: Fully aligned image tensor with the same shape as reference
+    """
+
+    input = input.squeeze(0)
+    reference = reference.squeeze(0)
+
+    # First perform spectral alignment
+    if spectral:
+        aligned = align_spectral(input, reference, mode="shift_scale")
+    else:
+        aligned = input
+    
+    # Then perform spatial alignment
+    if spatial:
+        aligned = align_spatial(aligned, reference, mode="ECC")
+
+    return aligned.unsqueeze(0).cuda()
+
+
+def get_valid_mask(input: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    """
+    Returns a mask selecting all valid pixels that are nonzero in all three channels of both input and reference images.
+    
+    Args:
+        input (torch.Tensor): First image tensor, shape (1, 3, H, W) for RGB
+        reference (torch.Tensor): Reference image tensor, shape (1, 3, H, W) for RGB
+    
+    Returns:
+        torch.Tensor: Boolean mask tensor of shape (1, 1, H, W) where True represents valid pixels
+    """
+
+    input = input.squeeze(0)
+    reference = reference.squeeze(0)
+
+    input_valid = (input > 0).all(dim=0)  # Check if all channels in input are nonzero
+    reference_valid = (reference > 0).all(dim=0)  # Check if all channels in reference are nonzero
+    
+    valid_mask = (input_valid & reference_valid)[None, None, ...]
+    return valid_mask
 
 

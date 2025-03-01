@@ -15,7 +15,7 @@ from torchmetrics.functional import structural_similarity_index_measure as ssim
 from torch.utils.data import DataLoader
 from data import get_dataset
 import cv2
-from utils import apply_shift_torch, bilinear_resize_torch
+from utils import apply_shift_torch, bilinear_resize_torch, align_output_to_target, get_valid_mask
 from coordinate_based_mlp import FourierNetwork
 from losses import BasicLosses, AdvancedLosses, CharbonnierLoss, RelativeLosses
 
@@ -299,6 +299,7 @@ def main():
     parser.add_argument("--root_satburst_synth", default="~/data/satburst_synth", help="Set root of worldstrat dataset")
     parser.add_argument("--root_worldstrat", default="~/data/worldstrat_kaggle", help="Set root of worldstrat dataset")
     parser.add_argument("--area_name", type=str, default="UNHCR-LBNs006446", help="str: a sample name of worldstrat dataset")
+    parser.add_argument("--worldstrat_hr_size", type=int, default=None, help="int: Default size is 1054")
     parser.add_argument("--sample_id", type=int, default="1", help="int: a sample index of burst_synth")
 
 
@@ -446,15 +447,19 @@ def main():
 
                     test_output = einops.rearrange(test_output, 'b h w c -> b c h w')
                     hr_image = einops.rearrange(hr_image, 'b h w c -> b c h w')
-
-                    # Calculate metrics for model output
-                    model_metrics = calculate_metrics(test_output, hr_image)
-                    
                     lr_sample = train_data.get_lr_sample(0).unsqueeze(0).to(device)
-
                     baseline_pred = bilinear_resize_torch(lr_sample, (hr_image.shape[2], hr_image.shape[3]))
 
+                    # align predictions and targets spectrally (no spatial alignment while optimizing)
+                    test_output = align_output_to_target(input=test_output, reference=hr_image, spatial=False)
+                    baseline_pred = align_output_to_target(input=baseline_pred, reference=hr_image, spatial=False)
+
+                    # Calculate metrics for model output
                     baseline_metrics = calculate_metrics(baseline_pred, hr_image)
+                    model_metrics = calculate_metrics(test_output, hr_image)
+                    
+
+
                 
                 # Store values in history
                 history['iterations'].append(i + 1)
@@ -585,12 +590,20 @@ def main():
 
         baseline_pred = bilinear_resize_torch(lr_sample, (hr_image.shape[2], hr_image.shape[3]))
 
+        # align predictions and targets
+        test_output = align_output_to_target(input=test_output, reference=hr_image)
+        baseline_pred = align_output_to_target(input=baseline_pred, reference=hr_image)        
+
         # Calculate PSNR for model output
-        mse_model = F.mse_loss(test_output, hr_image)
+        valid_mask = get_valid_mask(test_output, hr_image)
+        print("valid_mask:", valid_mask.shape)
+        mse_model = BasicLosses.mse_loss(test_output, hr_image, mask=valid_mask)
         psnr_model = -10 * torch.log10(mse_model)
         
         # Calculate PSNR for baseline
-        mse_baseline = F.mse_loss(baseline_pred, hr_image)
+        valid_mask = get_valid_mask(baseline_pred, hr_image)
+        print("valid_mask:", valid_mask.shape)
+        mse_baseline = BasicLosses.mse_loss(baseline_pred, hr_image, mask=valid_mask)
         psnr_baseline = -10 * torch.log10(mse_baseline)
     
     # Get LR target image (use sample_00 as it matches the HR ground truth)
@@ -614,6 +627,7 @@ def main():
         # Convert to numpy for plotting
         lr_target_img = lr_target_img.numpy()
     
+    # Convert tensors to numpy arrays for visualization
     hr_image = hr_image.cpu().permute(0, 2, 3, 1).numpy()
     baseline_pred = baseline_pred.cpu().permute(0, 2, 3, 1).numpy()
     test_output = test_output.cpu().permute(0, 2, 3, 1).numpy()
