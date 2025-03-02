@@ -100,6 +100,18 @@ def train_one_iteration(model, optimizer, train_sample, device, iteration=0, use
     optimizer.zero_grad()
 
     output, pred_shifts = model(input, sample_id)
+
+    # # print transform angles
+    # # check if model.transform_vectors is a nn.ParameterList
+    # if isinstance(model.transform_angles, nn.ParameterList):
+    #     angles = [p.item() for p in model.transform_angles.parameters()]
+    # else:
+    #     angles = model.transform_angles
+    # print("transform_angles:", angles)
+
+    # # print transform vectors
+    # vectors = [p[0].item() for p in model.transform_vectors.parameters()]
+    # print("transform_vectors:", vectors)
     
     # Downsample to match target resolution
     output = bilinear_resize_torch(output.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
@@ -291,6 +303,7 @@ def main():
     parser.add_argument("--aug", type=str, default="none", 
                        choices=['none', 'light', 'medium', 'heavy'],
                        help="Augmentation level to use")
+    parser.add_argument("--rotation", type=bool, default=False)
     # Add dataset argument
     parser.add_argument("--dataset", type=str, default="satburst_synth",
                         choices=["satburst_synth", "worldstrat", "burst_synth"],
@@ -347,7 +360,8 @@ def main():
     # initialize the dataloader here
     train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
 
-    model = FourierNetwork(mapping_size, *network_size, len(train_data), rggb=False).to(device)
+    model = FourierNetwork(mapping_size, *network_size, len(train_data), 
+                           rggb=False, rotation=args.rotation).to(device)
 
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = CosineAnnealingLR(optimizer, T_max=iters, eta_min=1e-6)

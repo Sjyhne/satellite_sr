@@ -62,3 +62,16 @@ The goal is to learn these sub-pixel transformations to improve super-resolution
 > python create_data_from_single_image.py
 
 > python satellite_rs_train.py --iters <num_iters> --d <cuda:device> --use_gt <True/False> --df <downsample_factor>
+
+
+### Worldstrat run
+
+```
+python satellite_rs_train.py --d 0 --lr_shift 1 --df 4 --samples 8 --bs 1 --dataset worldstrat --root_worldstrat ~/data/worldstrat_kaggle/ --area_name="Landcover-1295513" --iters 10000
+
+# Optimize affine transformation (translation plus rotation angle) by setting --rotation True
+python satellite_rs_train.py --d 0 --lr_shift 1 --df 4 --samples 8 --bs 1 --dataset worldstrat --root_worldstrat ~/data/worldstrat_kaggle/ --area_name="UNHCR-SYRs008164" --iters 10000 --worldstrat_hr_size 512 --rotation True
+
+```
+
+

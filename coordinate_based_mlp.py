@@ -55,7 +55,8 @@ def get_one_hot_encoding(num_classes):
 
 
 class FourierNetwork(nn.Module):
-    def __init__(self, input_dim, num_layers, num_channels, num_samples, coordinate_dim=2, code_dim=0, rggb=False):
+    def __init__(self, input_dim, num_layers, num_channels, num_samples, 
+                 coordinate_dim=2, code_dim=0, rggb=False, rotation=False):
         super().__init__()
 
         self.code_dim = code_dim
@@ -83,6 +84,7 @@ class FourierNetwork(nn.Module):
 
         # Create transform parameters for each sample
         self.transform_vectors = get_learnable_transforms(num_samples=num_samples, coordinate_dim=coordinate_dim)
+        self.transform_angles = get_learnable_transforms(num_samples=num_samples, coordinate_dim=1) if rotation else torch.zeros(num_samples, 1).cuda()
 
         # learnable codes for each frame
         if self.code_dim > 0:
@@ -128,17 +130,34 @@ class FourierNetwork(nn.Module):
             dx_list = []
             dy_list = []
             for i, sample_id in enumerate(sample_idx):
-                transform = self.transform_vectors[sample_id]
                 if dx_percent is not None and dy_percent is not None:
                     dx = dx_percent[i].squeeze()
                     dy = dy_percent[i].squeeze()
                 else:
+                    transform = self.transform_vectors[sample_id]
                     dx = transform[0]
                     dy = transform[1]
+                    angle = self.transform_angles[sample_id]
                 
                 # Apply transforms to coordinates
-                x[i, :, :, 0] += dx
-                x[i, :, :, 1] += dy
+                # x[i, :, :, 0] += dx
+                # x[i, :, :, 1] += dy
+
+                # create affine transformation matrix
+                self.theta = torch.stack([
+                    torch.stack([torch.cos(angle), -torch.sin(angle), dx.unsqueeze(0)]),  # Rotation and translation
+                    torch.stack([torch.sin(angle), torch.cos(angle), dy.unsqueeze(0)])    # Rotation and translation
+                ]).to(x.device)
+                # Apply affine transformation
+                # reshape x to [B, H*W, 2]
+                x_reshaped = x[i].reshape(-1, 2)
+                # convert to homogeneous coordinates: add ones to the last column
+                x_reshaped = torch.cat([x_reshaped, torch.ones(x_reshaped.shape[0], 1, device=x.device)], dim=1)
+                # apply affine transformation
+                x_reshaped = torch.matmul(x_reshaped, self.theta.T)
+                # reshape back to [B, H, W, 2]
+                x[i] = x_reshaped.reshape(H, W, 2)
+
                 with torch.no_grad():
                     dx_list.append(dx)
                     dy_list.append(dy)
