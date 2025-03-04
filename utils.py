@@ -219,6 +219,8 @@ def align_spectral(input: torch.Tensor, reference: torch.Tensor, mode: str = "sh
     
     # Adjust input to match reference statistics
     adjusted_input = (input - input_mean) / (input_std + 1e-6) * reference_std + reference_mean
+
+    adjusted_input = torch.clamp(adjusted_input, 0, 1)
     
     return adjusted_input
 

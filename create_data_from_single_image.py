@@ -123,6 +123,9 @@ def apply_atmospheric_augmentations(image, seed, augment_params=None):
     
     contrast_factor = torch.empty(1).uniform_(*augment_params['contrast']).item()
     aug_image = TF.adjust_contrast(aug_image, contrast_factor)
+
+    # Add heavy noise to the image
+    aug_image = aug_image + torch.randn_like(aug_image) * 0.1
     
     # Ensure values stay in [0, 1] range
     aug_image = torch.clamp(aug_image, 0, 1)
@@ -195,18 +198,21 @@ if __name__ == "__main__":
             'contrast': (0.9, 1.1),
             'saturation': (0.9, 1.1),
             'hue': (-0.05, 0.05),
+            'noise': 0.005
         },
         'medium': {
             'brightness': (0.8, 1.2),
             'contrast': (0.8, 1.2),
             'saturation': (0.8, 1.2),
             'hue': (-0.1, 0.1),
+            'noise': 0.01
         },
         'heavy': {
             'brightness': (0.6, 1.4),
             'contrast': (0.6, 1.4),
             'saturation': (0.6, 1.4),
             'hue': (-0.2, 0.2),
+            'noise': 0.02
         }
     }
     
@@ -261,16 +267,33 @@ if __name__ == "__main__":
                         # Apply augmentations only to non-reference samples (i > 0)
                         elif aug_type != 'none':
                             aug_seed = seed * 1000 + i
+                            
+                            # Apply atmospheric augmentations
                             shifted_patch = apply_atmospheric_augmentations(
                                 shifted_patch,
                                 seed=aug_seed,
                                 augment_params=augment_params[aug_type]
                             )
+                            
+                            # Add noise with correct shape
+                            permuted_patch = shifted_patch[0].permute(1, 2, 0)
+                            noise = np.random.randn(*permuted_patch.shape) * augment_params[aug_type]['noise']
+                            hr_np = (permuted_patch.cpu().numpy() * 255).astype(np.uint8) + noise
+                            hr_np = np.clip(hr_np, 0, 255).astype(np.uint8)
                         
                         # 4. Downsample to LR
                         shifted_lr = bilinear_resize_torch(shifted_patch, (hr_patch_size // factor, hr_patch_size // factor))
                         
-                        # 5. Save LR sample
+                        # 5. Add noise to LR sample based on augmentation type
+                        if aug_type != 'none':
+                            # Get noise level from augmentation parameters
+                            noise_level = augment_params[aug_type]['noise'] if aug_type in augment_params else 0.0
+                            
+                            # Add noise to the LR tensor
+                            noise = torch.randn_like(shifted_lr) * noise_level
+                            shifted_lr = torch.clamp(shifted_lr + noise, 0, 1)
+
+                        # Save LR sample
                         lr_np = (shifted_lr[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
                         lr_np = cv2.cvtColor(lr_np, cv2.COLOR_RGB2BGR)
                         cv2.imwrite(str(save_folder / f"sample_{i:02d}.png"), lr_np)

@@ -7,9 +7,31 @@ from pathlib import Path
 import rawpy
 import pickle as pkl
 import tifffile
+import random
 
-from utils import bilinear_resize_torch
 
+def get_and_standardize_image(image):
+    """Get and standardize image to have zero mean and unit std for each channel"""
+    # Check if image has a channel dimension
+    if image.dim() >= 3:
+        # Calculate mean and std along spatial dimensions only (not across channels)
+        # For [C, H, W] format
+        if image.dim() == 4:
+            mean = image.mean(dim=(1, 2, 3), keepdim=True)
+            std = image.std(dim=(1, 2, 3), keepdim=True)
+        # For [H, W, C] format
+        else:
+            mean = image.mean(dim=(0, 1, 2), keepdim=True)
+            std = image.std(dim=(0, 1, 2), keepdim=True)
+    else:
+        # For grayscale without channel dimension
+        mean = image.mean()
+        std = image.std()
+    
+    # Avoid division by zero
+    std = torch.clamp(std, min=1e-8)
+    
+    return (image - mean) / std, mean, std
 
 def get_dataset(args, name='satburst', keep_in_memory=True):
     """ Returns the dataset object based on the name """
@@ -36,7 +58,7 @@ class SRData(torch.utils.data.Dataset):
         """
         self.data_dir = Path(data_dir)
         self.keep_in_memory = keep_in_memory
-
+        
         # Load transformation log
         with open(self.data_dir / "transform_log.json", 'r') as f:
             self.transform_log = json.load(f)
@@ -44,18 +66,28 @@ class SRData(torch.utils.data.Dataset):
         # Get list of sample names
         self.samples = sorted(list(self.transform_log.keys()))
 
+        self.means = list()
+        self.stds = list()
+
         if self.keep_in_memory:
             self.images = {}
             for sample in self.samples:
                 img_path = self.data_dir / self.transform_log[sample]['path']
                 img = cv2.imread(str(img_path))
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                self.images[sample] = (torch.from_numpy(img).float() / 255.0).cuda()
-
+                img = torch.from_numpy(img).float() / 255.0
+                img, mean, std = get_and_standardize_image(img)
+                self.images[sample] = {
+                    "image": img,
+                    "mean": mean,
+                    "std": std
+                }
+        
         # Load original image for reference
         self.original = cv2.imread(str(self.data_dir / "hr_ground_truth.png"))
         self.original = cv2.cvtColor(self.original, cv2.COLOR_BGR2RGB)
         self.original = (torch.from_numpy(self.original).float() / 255.0).cuda()
+        # Standardize original image to have zero mean and no bias
 
         self.hr_coords = np.linspace(0, 1, self.original.shape[0], endpoint=False)
         self.hr_coords = np.stack(np.meshgrid(self.hr_coords, self.hr_coords), -1)
@@ -72,17 +104,22 @@ class SRData(torch.utils.data.Dataset):
         input_coordinates = self.hr_coords
         
         if self.keep_in_memory:
-            img = self.images[sample_name]
+            img = self.images[sample_name]["image"]
+            mean = self.images[sample_name]["mean"]
+            std = self.images[sample_name]["std"]
         else:
             # Load transformed image
             img_path = self.data_dir / sample_info['path']
             img = cv2.imread(str(img_path))
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = torch.from_numpy(img).float() / 255.0
+            img, mean, std = get_and_standardize_image(img)
         
         return {
             'input': input_coordinates,
             'lr_target': img,
+            'mean': mean,
+            'std': std,
             'sample_id': sample_id,
             'shifts': {
                 'dx_lr': sample_info['dx_pixels_lr'],
@@ -108,12 +145,26 @@ class SRData(torch.utils.data.Dataset):
         Returns:
             Tensor of shape [C, H, W] with values in [0, 1]
         """
-        sample_path = self.data_dir / f"sample_{index:02d}.png"
-        img = cv2.imread(str(sample_path))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = torch.from_numpy(img).float() / 255.0
-        img = img.permute(2, 0, 1)  # [H, W, C] -> [C, H, W]
+
+        if self.keep_in_memory:
+            img = self.images[self.samples[index]]["image"]
+            mean = self.images[self.samples[index]]["mean"]
+            std = self.images[self.samples[index]]["std"]
+            # Unstandardize the image
+            img = img * std + mean
+        else:
+            sample_path = self.data_dir / f"sample_{index:02d}.png"
+            img = cv2.imread(str(sample_path))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = torch.from_numpy(img).float() / 255.0
+
         return img
+
+    def get_lr_mean(self, index):
+        return self.images[self.samples[index]]["mean"]
+
+    def get_lr_std(self, index):
+        return self.images[self.samples[index]]["std"]
 
     def get_hr_coordinates(self):
         """Return the high-resolution coordinates."""
@@ -157,15 +208,19 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
         # Load ground truth image
         if self.keep_in_memory:
             self.gt_image = self._read_gt_image()
-            
-            # Pre-load all burst images
             self.burst_images = {}
             for idx in self.frame_indices:
-                self.burst_images[idx] = self._read_burst_image(idx)
+                img = self._read_burst_image(idx)
+                img_std, mean, std = get_and_standardize_image(img)
+                self.burst_images[idx] = {
+                    "image": img_std,
+                    "mean": mean,
+                    "std": std
+                }
         else:
             self.gt_image = None
             self.burst_images = None
-            
+        
         # Create coordinate grid for HR image
         if self.keep_in_memory:
             h, w = self.gt_image.shape[:-1]
@@ -204,7 +259,7 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
         
         # Apply gamma correction
         gamma = 2.2
-        rgb = np.power(rgb, 1.0/gamma)
+        rgb = np.power(np.maximum(rgb, 0), 1.0/gamma)
         
         # Clip values to [0, 1]
         rgb = np.clip(rgb, 0, 1)
@@ -225,7 +280,7 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
 
         # Apply gamma correction
         gamma = 2.2
-        gt_t = np.power(gt_t, 1.0/gamma)
+        gt_t = np.power(np.maximum(gt_t, 0), 1.0/gamma)
 
         gt_t = np.clip(gt_t, 0, 1)
 
@@ -240,14 +295,20 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
         
         # Load the burst image (or get from cache)
         if self.keep_in_memory and self.burst_images is not None:
-            burst_img = self.burst_images[frame_idx]
+            img = self.burst_images[frame_idx]["image"]
+            mean = self.burst_images[frame_idx]["mean"]
+            std = self.burst_images[frame_idx]["std"]
         else:
-            burst_img = self._read_burst_image(frame_idx)
+            # Load and standardize on demand
+            img = self._read_burst_image(frame_idx)
+            img, mean, std = get_and_standardize_image(img)
 
         # Return in a format similar to SRData
         return {
             'input': self.get_hr_coordinates(),
-            'lr_target': burst_img,  # Keep as [4, H, W]
+            'lr_target': img,
+            'mean': mean,
+            'std': std,
             'sample_id': idx,
             'burst_id': self.sample_id,
             'shifts': {
@@ -260,10 +321,14 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
         """Get all frames from the burst as a tensor [N, C, H, W]"""
         if self.keep_in_memory and self.burst_images is not None:
             # Use cached images
-            burst = [self.burst_images[idx] for idx in self.frame_indices]
+            burst = [self.burst_images[idx]["image"] for idx in self.frame_indices]
         else:
             # Load images on demand
-            burst = [self._read_burst_image(idx) for idx in self.frame_indices]
+            burst = []
+            for idx in self.frame_indices:
+                img = self._read_burst_image(idx)
+                img_std, _, _ = get_and_standardize_image(img)
+                burst.append(img_std)
         return torch.stack(burst, 0)
     
     def get_original_hr(self):
@@ -279,9 +344,21 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
             # Make sure frame_idx is in range
             if frame_idx >= len(self.frame_indices):
                 frame_idx = 0
-            return self.burst_images[self.frame_indices[frame_idx]].permute(2, 0, 1)
+            idx = self.frame_indices[frame_idx]
+            img = self.burst_images[idx]["image"]
+            mean = self.burst_images[idx]["mean"]
+            std = self.burst_images[idx]["std"]
+            # Unstandardize the image
+            img = img * std + mean
+            return img
         else:
-            return self._read_burst_image(self.frame_indices[frame_idx]).permute(2, 0, 1)
+            return self._read_burst_image(self.frame_indices[frame_idx])
+    
+    def get_lr_mean(self, frame_idx=0):
+        return self.burst_images[self.frame_indices[frame_idx]]["mean"]
+
+    def get_lr_std(self, frame_idx=0):
+        return self.burst_images[self.frame_indices[frame_idx]]["std"]
     
     def get_hr_coordinates(self):
         """Return coordinates for the HR image"""
@@ -379,10 +456,6 @@ class WorldStratDatasetFrame(torch.utils.data.Dataset):
         """Return the original image (before any transformations)"""
         return self.hr_image
     
-    def get_downsampled_original_hr(self):
-        """Return the downsampled original image"""
-        return downsample_torch(self.hr_image, (self.hr_image.shape[1] // 4, self.hr_image.shape[2] // 4))
-
     def get_hr_coordinates(self):
         """Return the high-resolution coordinates."""
         return self.hr_coords

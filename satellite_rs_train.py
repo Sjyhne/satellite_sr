@@ -17,13 +17,15 @@ from data import get_dataset
 import cv2
 from utils import apply_shift_torch, bilinear_resize_torch, align_output_to_target, get_valid_mask
 from coordinate_based_mlp import FourierNetwork
-from losses import BasicLosses, AdvancedLosses, CharbonnierLoss, RelativeLosses
+from losses import BasicLosses, AdvancedLosses, CharbonnierLoss, RelativeLosses, GradientDifferenceLoss, PerceptualLoss
 
 import einops
 import argparse
 
 import torch.fft
 
+import torch
+import torch.nn.functional as F
 
 def visualize_masked_images(output, target, mask, iteration, save_dir='./mask_vis'):
     """Visualize the masked output and target images."""
@@ -75,20 +77,15 @@ def train_one_iteration(model, optimizer, train_sample, device, iteration=0, use
     model.train()
 
     # Initialize loss functions
-    recon_criterion = BasicLosses.mae_loss  # Use MSE loss instead of GaussianNLLLoss
+    recon_criterion = BasicLosses.mse_loss
     trans_criterion = BasicLosses.mae_loss
-
-    epoch_recon_loss = 0.0
-    epoch_trans_loss = 0.0
-
-    pred_dxs = []
-    pred_dys = []
-    gt_dxs = []
-    gt_dys = []
 
     input = train_sample['input'].to(device)
     lr_target = train_sample['lr_target'].to(device)
     sample_id = train_sample['sample_id'].to(device)
+    lr_mean = train_sample['mean'].to(device)
+    lr_std = train_sample['std'].to(device)
+
 
     if 'shifts' in train_sample and 'dx_percent' in train_sample['shifts']:
         gt_dx = train_sample['shifts']['dx_percent'].to(device)
@@ -99,29 +96,16 @@ def train_one_iteration(model, optimizer, train_sample, device, iteration=0, use
 
     optimizer.zero_grad()
 
-    output, pred_shifts = model(input, sample_id)
+    output, pred_shifts, variance = model(input, sample_id)
 
-    # # print transform angles
-    # # check if model.transform_vectors is a nn.ParameterList
-    # if isinstance(model.transform_angles, nn.ParameterList):
-    #     angles = [p.item() for p in model.transform_angles.parameters()]
-    # else:
-    #     angles = model.transform_angles
-    # print("transform_angles:", angles)
-
-    # # print transform vectors
-    # vectors = [p[0].item() for p in model.transform_vectors.parameters()]
-    # print("transform_vectors:", vectors)
-    
     # Downsample to match target resolution
     output = bilinear_resize_torch(output.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
 
-    # Calculate reconstruction loss - ensure it's a scalar
     recon_loss = recon_criterion(output, lr_target)
-    
+
     pred_dx, pred_dy = pred_shifts
     trans_loss = trans_criterion(pred_dx, gt_dx) + trans_criterion(pred_dy, gt_dy)
-    
+
     # Only backpropagate the reconstruction loss
     recon_loss.backward()
     optimizer.step()
@@ -144,7 +128,7 @@ def test_one_epoch(model, test_loader, device):
     hr_image = test_loader.get_original_hr().unsqueeze(0).to(device)
     sample_id = torch.tensor([0]).to(device)
     
-    output, _ = model(hr_coords, sample_id)
+    output, _, _ = model(hr_coords, sample_id)
 
     loss = F.mse_loss(output, hr_image)
     
@@ -308,12 +292,13 @@ def main():
     parser.add_argument("--dataset", type=str, default="satburst_synth",
                         choices=["satburst_synth", "worldstrat", "burst_synth"],
                         help="Dataset implemented in data.get_dataset()")
-    parser.add_argument("--root_burst_synth", default="~/data/burst_synth", help="Set root of burst_synth")
+    parser.add_argument("--root_burst_synth", default="./SyntheticBurstVal", help="Set root of burst_synth")
     parser.add_argument("--root_satburst_synth", default="~/data/satburst_synth", help="Set root of worldstrat dataset")
     parser.add_argument("--root_worldstrat", default="~/data/worldstrat_kaggle", help="Set root of worldstrat dataset")
     parser.add_argument("--area_name", type=str, default="UNHCR-LBNs006446", help="str: a sample name of worldstrat dataset")
     parser.add_argument("--worldstrat_hr_size", type=int, default=None, help="int: Default size is 1054")
     parser.add_argument("--sample_id", type=int, default="1", help="int: a sample index of burst_synth")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay for AdamW")
 
 
     args = parser.parse_args()
@@ -336,10 +321,10 @@ def main():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    network_size = (4, 256)
-    learning_rate = 5e-3
+    network_size = (4, 1024)
+    learning_rate = 1e-3
     iters = args.iters
-    mapping_size = 128
+    mapping_size = 256
     downsample_factor = args.df
     lr_shift = args.lr_shift
     num_samples = args.samples
@@ -354,7 +339,7 @@ def main():
         args.root_satburst_synth = f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}"
 
     train_data = get_dataset(args=args, name=args.dataset)
-    
+
     batch_size = args.bs
 
     # initialize the dataloader here
@@ -363,7 +348,7 @@ def main():
     model = FourierNetwork(mapping_size, *network_size, len(train_data), 
                            rggb=False, rotation=args.rotation).to(device)
 
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=iters, eta_min=1e-6)
 
     # Initialize history dictionary with new metrics
@@ -453,15 +438,16 @@ def main():
             
             
             
-            if (i + 1) % 40 == 0:  # More frequent logging
+            if (i + 1) % 100 == 0:  # More frequent logging
                 with torch.no_grad():
                     test_loss, test_output, hr_image = test_one_epoch(model, train_data, device)
 
-                    print("ff_scale:", model.ff_scale.item())
+                    # Unstandardize the output
+                    test_output = test_output * train_data.get_lr_std(0).cuda() + train_data.get_lr_mean(0).cuda()
 
                     test_output = einops.rearrange(test_output, 'b h w c -> b c h w')
                     hr_image = einops.rearrange(hr_image, 'b h w c -> b c h w')
-                    lr_sample = train_data.get_lr_sample(0).unsqueeze(0).to(device)
+                    lr_sample = train_data.get_lr_sample(0).unsqueeze(0).permute(0, 3, 1, 2).to(device)
                     baseline_pred = bilinear_resize_torch(lr_sample, (hr_image.shape[2], hr_image.shape[3]))
 
                     # align predictions and targets spectrally (no spatial alignment while optimizing)
@@ -597,7 +583,7 @@ def main():
 
         # Final test and visualization
         test_loss, test_output, hr_image = test_one_epoch(model, train_data, device)
-        lr_sample = train_data.get_lr_sample(0).unsqueeze(0).to(device)
+        lr_sample = train_data.get_lr_sample(0).unsqueeze(0).permute(0, 3, 1, 2).to(device)
 
         test_output = einops.rearrange(test_output, 'b h w c -> b c h w')
         hr_image = einops.rearrange(hr_image, 'b h w c -> b c h w')
@@ -605,8 +591,8 @@ def main():
         baseline_pred = bilinear_resize_torch(lr_sample, (hr_image.shape[2], hr_image.shape[3]))
 
         # align predictions and targets
-        test_output = align_output_to_target(input=test_output, reference=hr_image)
-        baseline_pred = align_output_to_target(input=baseline_pred, reference=hr_image)        
+        test_output = align_output_to_target(input=test_output, reference=hr_image, spatial=False)
+        baseline_pred = align_output_to_target(input=baseline_pred, reference=hr_image, spatial=False)        
 
         # Calculate PSNR for model output
         valid_mask = get_valid_mask(test_output, hr_image)
@@ -621,7 +607,7 @@ def main():
         psnr_baseline = -10 * torch.log10(mse_baseline)
     
     # Get LR target image (use sample_00 as it matches the HR ground truth)
-    lr_target_img = train_data.get_lr_sample(0)  # Get sample_00
+    lr_target_img = train_data.get_lr_sample(0).permute(2, 0, 1)  # Get sample_00
     if torch.is_tensor(lr_target_img):
         # First, ensure the image is in the right format
         # If it's [C, H, W], convert to [H, W, C]
