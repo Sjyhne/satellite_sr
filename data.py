@@ -68,6 +68,7 @@ class SRData(torch.utils.data.Dataset):
 
         self.means = list()
         self.stds = list()
+        self.lr_image_sizes = list()
 
         if self.keep_in_memory:
             self.images = {}
@@ -77,6 +78,7 @@ class SRData(torch.utils.data.Dataset):
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 img = torch.from_numpy(img).float() / 255.0
                 img, mean, std = get_and_standardize_image(img)
+                self.lr_image_sizes.append(img.shape[1:3])
                 self.images[sample] = {
                     "image": img,
                     "mean": mean,
@@ -102,7 +104,7 @@ class SRData(torch.utils.data.Dataset):
         sample_id = int(sample_name.split("_")[-1])
 
         input_coordinates = self.hr_coords
-        
+
         if self.keep_in_memory:
             img = self.images[sample_name]["image"]
             mean = self.images[sample_name]["mean"]
@@ -188,7 +190,7 @@ class SyntheticBurstVal(torch.utils.data.Dataset):
         self.rggb = True
         
         # Format sample_id as a 4-digit string with leading zeros
-        self.sample_id_str = f"{sample_id:04d}"
+        self.sample_id_str = f"{int(sample_id):04d}"
         
         # Set up paths
         self.gt_dir = self.data_dir / "gt" / self.sample_id_str

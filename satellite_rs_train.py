@@ -130,6 +130,10 @@ def test_one_epoch(model, test_loader, device):
     
     output, _, _ = model(hr_coords, sample_id)
 
+    # output is centered around 0, so we need to unstandardize it
+    # We then use the mean and std of the sample 0 which we use as "fixed"
+    output = output * test_loader.get_lr_std(0).cuda() + test_loader.get_lr_mean(0).cuda()
+
     loss = F.mse_loss(output, hr_image)
     
     return loss.item(), output.detach(), hr_image.detach()
@@ -297,7 +301,7 @@ def main():
     parser.add_argument("--root_worldstrat", default="~/data/worldstrat_kaggle", help="Set root of worldstrat dataset")
     parser.add_argument("--area_name", type=str, default="UNHCR-LBNs006446", help="str: a sample name of worldstrat dataset")
     parser.add_argument("--worldstrat_hr_size", type=int, default=None, help="int: Default size is 1054")
-    parser.add_argument("--sample_id", type=int, default="1", help="int: a sample index of burst_synth")
+    parser.add_argument("--sample_id", default="1", help="str: a sample index of burst_synth")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay for AdamW")
 
 
@@ -321,22 +325,75 @@ def main():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    network_size = (4, 1024)
-    learning_rate = 1e-3
+    network_size = (4, 256)
+    learning_rate = 5e-4
     iters = args.iters
-    mapping_size = 256
+    mapping_size = 1024
     downsample_factor = args.df
     lr_shift = args.lr_shift
     num_samples = args.samples
 
-    # Create results directory based on dataset parameters
-    results_dir = Path(f"results/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}")
+    # Create a more organized results directory structure
+    # Base results directory
+    base_results_dir = Path("results")
+    base_results_dir.mkdir(exist_ok=True)
+    
+    # First level: dataset name
+    dataset_dir = base_results_dir / args.dataset
+    
+    # Second level: image/sample name or ID
+    if args.dataset == "satburst_synth":
+        sample_id = args.sample_id
+    elif args.dataset == "burst_synth":
+        sample_id = f"sample_{args.sample_id}"
+    elif args.dataset == "worldstrat":
+        sample_id = args.area_name
+    else:
+        sample_id = "unknown_sample"
+    
+    # Third level: key experiment parameters
+    experiment_name = f"df{downsample_factor}_shift{lr_shift:.1f}_samples{num_samples}"
+    if args.aug != "none":
+        experiment_name += f"_aug{args.aug}"
+    
+    # Combine all parts (removed timestamp)
+    results_dir = dataset_dir / sample_id / experiment_name
     results_dir.mkdir(parents=True, exist_ok=True)
     print(f"Saving results to: {results_dir}")
+    
+    # Save detailed configuration to a JSON file
+    import json
+    config = {
+        # Dataset parameters
+        "dataset": args.dataset,
+        "sample_id": sample_id,
+        "downsampling_factor": downsample_factor,
+        "lr_shift": lr_shift,
+        "num_samples": num_samples,
+        "augmentation": args.aug,
+        
+        # Model parameters
+        "model": args.model,
+        "network_size": network_size,
+        "mapping_size": mapping_size,
+        "rotation": args.rotation,
+        "rggb": False,
+        
+        # Training parameters
+        "iterations": iters,
+        "learning_rate": learning_rate,
+        "weight_decay": args.weight_decay,
+        "batch_size": args.bs,
+        "seed": args.seed,
+        "use_gt": args.use_gt
+    }
+    
+    with open(results_dir / "experiment_config.json", "w") as f:
+        json.dump(config, f, indent=2)
 
     # Load the dataset
     if args.dataset == "satburst_synth":
-        args.root_satburst_synth = f"data/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}"
+        args.root_satburst_synth = f"data/{args.sample_id}/lr_factor_{downsample_factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{args.aug}"
 
     train_data = get_dataset(args=args, name=args.dataset)
 
@@ -443,8 +500,6 @@ def main():
                     test_loss, test_output, hr_image = test_one_epoch(model, train_data, device)
 
                     # Unstandardize the output
-                    test_output = test_output * train_data.get_lr_std(0).cuda() + train_data.get_lr_mean(0).cuda()
-
                     test_output = einops.rearrange(test_output, 'b h w c -> b c h w')
                     hr_image = einops.rearrange(hr_image, 'b h w c -> b c h w')
                     lr_sample = train_data.get_lr_sample(0).unsqueeze(0).permute(0, 3, 1, 2).to(device)

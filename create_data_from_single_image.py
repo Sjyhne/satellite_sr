@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from utils import apply_shift_torch, bilinear_resize_torch
 import torchvision.transforms.functional as TF
 from torchvision import transforms
+import os
 
 def generate_random_translations(num_samples, max_pixels_x, max_pixels_y=None):
     """
@@ -147,15 +148,14 @@ if __name__ == "__main__":
     device = "cuda:0"
     
     # Image settings
-    target_hr_size = 740  # Size to resize the full HR image to (after border crop)
-    hr_patch_size = 256   # Size of HR patches to extract
+    hr_patch_size = 256 # Set to None to use full image, or a number (e.g., 256) for patch extraction
     
     # Multiple downsampling factors to generate
-    downsampling_factors = [1, 4] # [1, 2, 4, 8]
+    downsampling_factors = [1, 4]
     
     # Translation settings
-    lr_pixel_shifts = [1] # [0.5, 1.0, 2.0, 4.0]  # Each will get its own dataset
-    sample_counts = [12] #[1, 4, 8, 12, 16]  # Different numbers of samples to test
+    lr_pixel_shifts = [1.0] # [0.5, 1.0, 2.0, 4.0]  # Each will get its own dataset
+    sample_counts = [64] #[1, 4, 8, 12, 16]  # Different numbers of samples to test
     
     # Cropping settings
     border_crop = 20  # Pixels to remove from border (black edge)
@@ -163,35 +163,21 @@ if __name__ == "__main__":
     # Create base data directory
     base_save_folder = pathlib.Path("data")
     
-    # Load and crop border from image
-    img_path = pathlib.Path("images/hr_image.png")
-    original_img = cv2.imread(str(img_path))
-    original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
-    original_img = original_img[border_crop:-border_crop, border_crop:-border_crop]
+    # Input folder containing HR images
+    input_folder = pathlib.Path("SynthSatBurst/hr_images_20")
     
-    # Resize to target HR size
-    # original_img = cv2.resize(original_img, (target_hr_size, target_hr_size))
+    # Get all image files from the input folder
+    image_extensions = ['.png', '.jpg', '.jpeg', '.tif', '.tiff']
+    image_files = [f for f in input_folder.iterdir() if f.suffix.lower() in image_extensions]
     
-    # Convert to torch tensor
-    original_img = torch.from_numpy(original_img).float() / 255.0
-    original_img = original_img.permute(2, 0, 1).unsqueeze(0).to(device)
+    if not image_files:
+        print(f"No image files found in {input_folder}")
+        exit(1)
     
-    # Calculate center position for the base patch
-    height, width = original_img.shape[-2:]
-    center_y = (height // 2) - 100
-    center_x = (width // 2) - 100
-    half_patch = hr_patch_size // 2
-    
-    # Extract the center patch (this will be our HR ground truth)
-    base_hr_patch = original_img[
-        :,
-        :,
-        center_y - half_patch:center_y + half_patch,
-        center_x - half_patch:center_x + half_patch
-    ]
+    print(f"Found {len(image_files)} images to process")
     
     # Augmentation settings
-    augmentation_types = ['none', 'light', 'medium', 'heavy']
+    augmentation_types = ['none', 'light', 'medium']
     augment_params = {
         'light': {
             'brightness': (0.9, 1.1),
@@ -216,110 +202,152 @@ if __name__ == "__main__":
         }
     }
     
-    # Process each combination of factor, shift, and sample count
-    for factor in downsampling_factors:
-        for lr_shift in lr_pixel_shifts:
-            for num_samples in sample_counts:
-                # Generate translations once for all augmentation types
-                random.seed(seed)  # Reset seed before generating translations
-                translations = generate_fixed_magnitude_translations(
-                    num_samples=num_samples,
-                    lr_pixel_shift=lr_shift,
-                    factor=factor
-                )
-                
-                # Now use these same translations for each augmentation type
-                for aug_type in augmentation_types:
-                    print(f"\nProcessing factor {factor}x with {lr_shift}px LR shift, "
-                          f"{num_samples} samples, and {aug_type} augmentation")
+    # Process each image
+    for img_idx, img_path in enumerate(image_files):
+        print(f"\nProcessing image {img_idx+1}/{len(image_files)}: {img_path.name}")
+        
+        # Load and crop border from image
+        original_img = cv2.imread(str(img_path))
+        original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
+        original_img = original_img[border_crop:-border_crop, border_crop:-border_crop]
+        
+        # Convert to torch tensor
+        original_img = torch.from_numpy(original_img).float() / 255.0
+        original_img = original_img.permute(2, 0, 1).unsqueeze(0).to(device)
+        
+        # Get image dimensions
+        height, width = original_img.shape[-2:]
+        
+        # Determine if we're using a patch or the full image
+        if hr_patch_size is None:
+            # Use full image
+            hr_img = original_img
+            print(f"  Using full image with dimensions {width}x{height}")
+        else:
+            # Calculate center position for the base patch
+            center_y = (height // 2) + 100
+            center_x = (width // 2) + 100
+            half_patch = hr_patch_size // 2
+            
+            # Make sure the patch fits within the image
+            if center_y - half_patch < 0 or center_y + half_patch > height or \
+               center_x - half_patch < 0 or center_x + half_patch > width:
+                print(f"Warning: Image {img_path.name} is too small for the patch size. Skipping.")
+                continue
+            
+            # Extract the center patch (this will be our HR ground truth)
+            hr_img = original_img[
+                :,
+                :,
+                center_y - half_patch:center_y + half_patch,
+                center_x - half_patch:center_x + half_patch
+            ]
+            print(f"  Using patch of size {hr_patch_size}x{hr_patch_size} from center of image")
+        
+        # Create a subfolder for this image
+        image_name = img_path.stem
+        
+        # Process each combination of factor, shift, and sample count
+        for factor in downsampling_factors:
+            for lr_shift in lr_pixel_shifts:
+                for num_samples in sample_counts:
+                    # Generate translations once for all augmentation types
+                    random.seed(seed + img_idx)  # Use different seed for each image
+                    translations = generate_fixed_magnitude_translations(
+                        num_samples=num_samples,
+                        lr_pixel_shift=lr_shift,
+                        factor=factor
+                    )
                     
-                    # Create directory for this combination
-                    save_folder = base_save_folder / f"lr_factor_{factor}x_shift_{lr_shift:.1f}px_samples_{num_samples}_aug_{aug_type}"
-                    save_folder.mkdir(parents=True, exist_ok=True)
-                    
-                    transform_log = {}
-                    
-                    for i, (dx, dy) in enumerate(translations):
-                        if i == 0:
-                            dx = 0
-                            dy = 0
+                    # Now use these same translations for each augmentation type
+                    for aug_type in augmentation_types:
+                        print(f"  Processing factor {factor}x with {lr_shift}px LR shift, "
+                              f"{num_samples} samples, and {aug_type} augmentation")
                         
-                        # 1. First apply shift to full image
-                        shifted_full = apply_shift_torch(
-                            original_img,
-                            dx=torch.tensor([dx], device=device),
-                            dy=torch.tensor([dy], device=device)
-                        )
+                        # Create directory for this combination
+                        save_folder = base_save_folder / image_name / f"scale_{factor}_shift_{lr_shift:.1f}px_aug_{aug_type}"
+                        save_folder.mkdir(parents=True, exist_ok=True)
                         
-                        # 2. Extract HR patch
-                        shifted_patch = shifted_full[
-                            :,
-                            :,
-                            center_y - half_patch:center_y + half_patch,
-                            center_x - half_patch:center_x + half_patch
-                        ]
+                        transform_log = {}
                         
-                        # 3. Save HR patch for reference sample without augmentation
-                        if i == 0:
-                            hr_np = (shifted_patch[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-                            hr_np = cv2.cvtColor(hr_np, cv2.COLOR_RGB2BGR)
-                            cv2.imwrite(str(save_folder / "hr_ground_truth.png"), hr_np)
-                        # Apply augmentations only to non-reference samples (i > 0)
-                        elif aug_type != 'none':
-                            aug_seed = seed * 1000 + i
+                        for i, (dx, dy) in enumerate(translations):
+                            if i == 0:
+                                dx = 0
+                                dy = 0
                             
-                            # Apply atmospheric augmentations
-                            shifted_patch = apply_atmospheric_augmentations(
-                                shifted_patch,
-                                seed=aug_seed,
-                                augment_params=augment_params[aug_type]
+                            # 1. First apply shift to full image
+                            shifted_full = apply_shift_torch(
+                                original_img,
+                                dx=torch.tensor([dx], device=device),
+                                dy=torch.tensor([dy], device=device)
                             )
                             
-                            # Add noise with correct shape
-                            permuted_patch = shifted_patch[0].permute(1, 2, 0)
-                            noise = np.random.randn(*permuted_patch.shape) * augment_params[aug_type]['noise']
-                            hr_np = (permuted_patch.cpu().numpy() * 255).astype(np.uint8) + noise
-                            hr_np = np.clip(hr_np, 0, 255).astype(np.uint8)
-                        
-                        # 4. Downsample to LR
-                        shifted_lr = bilinear_resize_torch(shifted_patch, (hr_patch_size // factor, hr_patch_size // factor))
-                        
-                        # 5. Add noise to LR sample based on augmentation type
-                        if aug_type != 'none':
-                            # Get noise level from augmentation parameters
-                            noise_level = augment_params[aug_type]['noise'] if aug_type in augment_params else 0.0
+                            # 2. Extract HR patch or use full image
+                            if hr_patch_size is None:
+                                shifted_patch = shifted_full
+                            else:
+                                shifted_patch = shifted_full[
+                                    :,
+                                    :,
+                                    center_y - half_patch:center_y + half_patch,
+                                    center_x - half_patch:center_x + half_patch
+                                ]
                             
-                            # Add noise to the LR tensor
-                            noise = torch.randn_like(shifted_lr) * noise_level
-                            shifted_lr = torch.clamp(shifted_lr + noise, 0, 1)
+                            # 3. Save HR patch for reference sample without augmentation
+                            if i == 0:
+                                hr_np = (shifted_patch[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                                hr_np = cv2.cvtColor(hr_np, cv2.COLOR_RGB2BGR)
+                                cv2.imwrite(str(save_folder / "hr_ground_truth.png"), hr_np)
+                            # Apply augmentations only to non-reference samples (i > 0)
+                            if aug_type != 'none' and i > 0:
+                                aug_seed = seed * 1000 + img_idx * 100 + i
+                                
+                                # Apply atmospheric augmentations
+                                if i > 1:
+                                    shifted_patch = apply_atmospheric_augmentations(
+                                        shifted_patch,
+                                        seed=aug_seed,
+                                        augment_params=augment_params[aug_type]
+                                    )
+                                
+                                # Add noise with correct shape
+                                permuted_patch = shifted_patch[0].permute(1, 2, 0)
+                                noise = np.random.randn(*permuted_patch.shape) * augment_params[aug_type]['noise']
+                                hr_np = (permuted_patch.cpu().numpy() * 255).astype(np.uint8) + noise
+                                hr_np = np.clip(hr_np, 0, 255).astype(np.uint8)
+                            
+                            # 4. Downsample to LR
+                            if hr_patch_size is None:
+                                # Calculate LR size based on original dimensions
+                                lr_height, lr_width = height // factor, width // factor
+                            else:
+                                lr_height = lr_width = hr_patch_size // factor
+                                
+                            shifted_lr = bilinear_resize_torch(shifted_patch, (lr_height, lr_width))
 
-                        # Save LR sample
-                        lr_np = (shifted_lr[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-                        lr_np = cv2.cvtColor(lr_np, cv2.COLOR_RGB2BGR)
-                        cv2.imwrite(str(save_folder / f"sample_{i:02d}.png"), lr_np)
+                            # Save LR sample
+                            lr_np = (shifted_lr[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                            lr_np = cv2.cvtColor(lr_np, cv2.COLOR_RGB2BGR)
+                            cv2.imwrite(str(save_folder / f"sample_{i:02d}.png"), lr_np)
+                            
+                            # Update transform log
+                            transform_log[f"sample_{i:02d}"] = {
+                                'dx_pixels_hr': dx,
+                                'dy_pixels_hr': dy,
+                                'dx_pixels_lr': dx / factor,
+                                'dy_pixels_lr': dy / factor,
+                                'dx_percent': (dx/factor) / lr_width,
+                                'dy_percent': (dy/factor) / lr_height,
+                                'magnitude_pixels_hr': np.sqrt(dx**2 + dy**2),
+                                'magnitude_pixels_lr': np.sqrt((dx/factor)**2 + (dy/factor)**2),
+                                'shape': lr_np.shape,
+                                'path': f"sample_{i:02d}.png",
+                                'augmentation': aug_type
+                            }
                         
-                        # Update transform log
-                        transform_log[f"sample_{i:02d}"] = {
-                            'dx_pixels_hr': dx,
-                            'dy_pixels_hr': dy,
-                            'dx_pixels_lr': dx / factor,
-                            'dy_pixels_lr': dy / factor,
-                            'dx_percent': (dx/factor) / (hr_patch_size // factor),
-                            'dy_percent': (dy/factor) / (hr_patch_size // factor),
-                            'magnitude_pixels_hr': np.sqrt(dx**2 + dy**2),
-                            'magnitude_pixels_lr': np.sqrt((dx/factor)**2 + (dy/factor)**2),
-                            'shape': lr_np.shape,
-                            'path': f"sample_{i:02d}.png",
-                            'augmentation': aug_type
-                        }
-                    
-                    # Save transform log
-                    with open(save_folder / "transform_log.json", 'w') as f:
-                        json.dump(transform_log, f, indent=2)
+                        # Save transform log
+                        with open(save_folder / "transform_log.json", 'w') as f:
+                            json.dump(transform_log, f, indent=2)
 
-                    # Print transform log summary
-                    print(f"\nFor factor {factor}x with {lr_shift}px LR shift and {num_samples} samples:")
-                    for sample_name, trans in transform_log.items():
-                        print(f"{sample_name}: dx_lr={trans['dx_pixels_lr']:.3f}, dy_lr={trans['dy_pixels_lr']:.3f}, "
-                              f"dx_percent={trans['dx_percent']:.3f}, dy_percent={trans['dy_percent']:.3f}")
+    print("\nProcessing complete!")
 

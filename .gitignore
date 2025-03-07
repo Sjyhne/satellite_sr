@@ -190,3 +190,7 @@ test_burst/
 *.tar.bz2
 *.tar.xz
 *.tar.lzma
+
+
+BurstSR/
+deep-rep/
