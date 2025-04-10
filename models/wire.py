@@ -56,9 +56,9 @@ class ComplexGaborLayer(nn.Module):
 
 class Wire(nn.Module):
     def __init__(self, input_dim, hidden_dim,
-                 output_dim=3, num_layers=4, activation=None, outermost_linear=True,
-                 first_omega_0=30, hidden_omega_0=30., scale=10.0,
-                 pos_encode=False, sidelength=512, fn_samples=None,
+                 output_dim=3, depth=4, activation=None, outermost_linear=True,
+                 first_omega_0=10.0, hidden_omega_0=10.0, scale=5.0,
+                 pos_encode=False, sidelength=256, fn_samples=None,
                  use_nyquist=True, sigmoid_output=False):
         super().__init__()
         
@@ -67,13 +67,14 @@ class Wire(nn.Module):
         
         # Since complex numbers are two real numbers, reduce the number of 
         # hidden parameters by 2
-        hidden_features = int(hidden_features/np.sqrt(2))
+        hidden_dim = int(hidden_dim/np.sqrt(2))
         dtype = torch.cfloat
         self.complex = True
         self.wavelet = 'gabor'
         
         # Legacy parameter
         self.pos_encode = False
+
             
         self.net = []
         self.net.append(self.nonlin(input_dim,
@@ -83,7 +84,7 @@ class Wire(nn.Module):
                                     is_first=True,
                                     trainable=False))
 
-        for i in range(num_layers):
+        for i in range(depth - 2):
             self.net.append(self.nonlin(hidden_dim,
                                         hidden_dim, 
                                         omega0=hidden_omega_0,

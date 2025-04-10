@@ -9,7 +9,7 @@ class LinearProjection(nn.Module):
     This is a simpler projection method that applies a fixed linear transformation
     followed by an activation function. The linear weights are frozen after initialization.
     """
-    def __init__(self, project_dim, scale=10, input_dim=2, activation=F.relu, device="cuda"):
+    def __init__(self, project_dim, activation=F.relu, input_dim=2, device=None):
         """
         Initialize the linear projection.
         
@@ -29,6 +29,7 @@ class LinearProjection(nn.Module):
         
         # Activation function to apply after linear transformation
         self.activation = activation
+        self.device = device
 
         if self.activation is None:
             raise ValueError("Activation function must be provided for LinearProjection")

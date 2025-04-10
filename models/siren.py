@@ -44,9 +44,9 @@ class SineLayer(nn.Module):
     
 class Siren(nn.Module):
     def __init__(self, input_dim, hidden_dim, 
-                 output_dim=3, num_layers=4, activation=None, outermost_linear=True,
-                 first_omega_0=30, hidden_omega_0=30., scale=10.0,
-                 pos_encode=False, sidelength=512, fn_samples=None,
+                 output_dim=3, depth=4, activation=None, outermost_linear=True,
+                 first_omega_0=10.0, hidden_omega_0=10.0, scale=5.0,
+                 pos_encode=False, sidelength=256, fn_samples=None,
                  use_nyquist=True, sigmoid_output=False):
         super().__init__()
         self.pos_encode = pos_encode
@@ -57,7 +57,7 @@ class Siren(nn.Module):
                                   is_first=True, omega_0=first_omega_0,
                                   scale=scale))
 
-        for i in range(num_layers):
+        for i in range(depth - 2):
             self.net.append(self.nonlin(hidden_dim, hidden_dim, 
                                       is_first=False, omega_0=hidden_omega_0,
                                       scale=scale))

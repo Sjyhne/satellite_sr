@@ -151,10 +151,10 @@ if __name__ == "__main__":
     hr_patch_size = 256 # Set to None to use full image, or a number (e.g., 256) for patch extraction
     
     # Multiple downsampling factors to generate
-    downsampling_factors = [1, 4]
+    downsampling_factors = [1, 2, 4, 8]
     
     # Translation settings
-    lr_pixel_shifts = [1.0] # [0.5, 1.0, 2.0, 4.0]  # Each will get its own dataset
+    lr_pixel_shifts = [0.5, 1.0, 2.0, 4.0]  # Each will get its own dataset
     sample_counts = [64] #[1, 4, 8, 12, 16]  # Different numbers of samples to test
     
     # Cropping settings

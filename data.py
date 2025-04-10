@@ -36,7 +36,7 @@ def get_and_standardize_image(image):
 def get_dataset(args, name='satburst', keep_in_memory=True):
     """ Returns the dataset object based on the name """
     if name == 'satburst_synth':
-        return SRData(data_dir=args.root_satburst_synth, keep_in_memory=keep_in_memory)
+        return SRData(data_dir=args.root_satburst_synth, num_samples=args.num_samples, keep_in_memory=keep_in_memory)
     elif name == 'burst_synth':
         return SyntheticBurstVal(data_dir=args.root_burst_synth, 
                                  sample_id=args.sample_id, keep_in_memory=keep_in_memory)
@@ -48,7 +48,7 @@ def get_dataset(args, name='satburst', keep_in_memory=True):
 
 
 class SRData(torch.utils.data.Dataset):
-    def __init__(self, data_dir, keep_in_memory=True):
+    def __init__(self, data_dir, num_samples, keep_in_memory=True):
         """
         Initialize SR dataset from generated data directory.
         
@@ -58,6 +58,7 @@ class SRData(torch.utils.data.Dataset):
         """
         self.data_dir = Path(data_dir)
         self.keep_in_memory = keep_in_memory
+        self.num_samples = num_samples
         
         # Load transformation log
         with open(self.data_dir / "transform_log.json", 'r') as f:
@@ -65,6 +66,7 @@ class SRData(torch.utils.data.Dataset):
             
         # Get list of sample names
         self.samples = sorted(list(self.transform_log.keys()))
+        self.samples = self.samples[:num_samples]
 
         self.means = list()
         self.stds = list()
@@ -91,7 +93,7 @@ class SRData(torch.utils.data.Dataset):
         self.original = (torch.from_numpy(self.original).float() / 255.0).cuda()
         # Standardize original image to have zero mean and no bias
 
-        self.hr_coords = np.linspace(0, 1, self.original.shape[0], endpoint=False)
+        self.hr_coords = np.linspace(-0.5, 0.5, self.original.shape[0], endpoint=False)
         self.hr_coords = np.stack(np.meshgrid(self.hr_coords, self.hr_coords), -1)
         self.hr_coords = torch.FloatTensor(self.hr_coords).cuda()
 
