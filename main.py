@@ -64,10 +64,10 @@ def train_one_iteration(model, optimizer, train_sample, device, iteration=0, use
     optimizer.zero_grad()
 
     if model.use_gnll:
-        output, pred_shifts, pred_variance = model(input, sample_id, scale_factor=0.25)
+        output, pred_shifts, pred_variance = model(input, sample_id, scale_factor=0.25, lr_frames=lr_target)
         # pred_variance = bilinear_resize_torch(pred_variance.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
     else:
-        output, pred_shifts = model(input, sample_id, scale_factor=0.25)
+        output, pred_shifts = model(input, sample_id, scale_factor=0.25, lr_frames=lr_target)
 
     # Downsample to match target resolution
     # output = bilinear_resize_torch(output.permute(0, 3, 1, 2), (lr_target.shape[1], lr_target.shape[2])).permute(0, 2, 3, 1)
@@ -267,7 +267,7 @@ def main():
     training_group.add_argument("--seed", type=int, default=10, help="Random seed for reproducibility")
     training_group.add_argument("--iters", type=int, default=1000, help="Number of training iterations")
     training_group.add_argument("--bs", type=int, default=1, help="Batch size")
-    training_group.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for the optimizer")
+    training_group.add_argument("--learning_rate", type=float, default=5e-4, help="Learning rate for the optimizer")
     training_group.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay for AdamW")
     
     # Utility parameters

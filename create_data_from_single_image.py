@@ -322,7 +322,8 @@ if __name__ == "__main__":
                                 lr_height, lr_width = height // factor, width // factor
                             else:
                                 lr_height = lr_width = hr_patch_size // factor
-                                
+                            
+                            # TODO: Maybe add the noise in the LR space?
                             shifted_lr = bilinear_resize_torch(shifted_patch, (lr_height, lr_width))
 
                             # Save LR sample
