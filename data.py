@@ -93,7 +93,7 @@ class SRData(torch.utils.data.Dataset):
         self.original = (torch.from_numpy(self.original).float() / 255.0).cuda()
         # Standardize original image to have zero mean and no bias
 
-        self.hr_coords = np.linspace(-0.5, 0.5, self.original.shape[0], endpoint=False)
+        self.hr_coords = np.linspace(0, 1, self.original.shape[0], endpoint=False)
         self.hr_coords = np.stack(np.meshgrid(self.hr_coords, self.hr_coords), -1)
         self.hr_coords = torch.FloatTensor(self.hr_coords).cuda()
 

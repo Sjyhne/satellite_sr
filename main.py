@@ -264,7 +264,7 @@ def main():
                                   
     # Training parameters
     training_group = parser.add_argument_group('Training Parameters')
-    training_group.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    training_group.add_argument("--seed", type=int, default=10, help="Random seed for reproducibility")
     training_group.add_argument("--iters", type=int, default=1000, help="Number of training iterations")
     training_group.add_argument("--bs", type=int, default=1, help="Batch size")
     training_group.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for the optimizer")
@@ -401,7 +401,7 @@ def main():
         batch_size = args.bs
 
         # initialize the dataloader here
-        train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+        train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=False)
 
         input_projection = get_input_projection(args.input_projection, 2, args.projection_dim, device, args.fourier_scale, args.legendre_max_degree, args.activation)
 

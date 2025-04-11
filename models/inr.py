@@ -20,8 +20,8 @@ class INR(nn.Module):
         
         self.use_gnll = use_gnll
 
-        self.shift_vectors = get_learnable_transforms(num_samples=num_samples, coordinate_dim=coordinate_dim)
-        self.rotation_angle = get_learnable_transforms(num_samples=num_samples, coordinate_dim=1)
+        self.shift_vectors = get_learnable_transforms(num_samples=num_samples, coordinate_dim=coordinate_dim, zeros=True)
+        self.rotation_angle = get_learnable_transforms(num_samples=num_samples, coordinate_dim=1, zeros=True)
         
         ct = nn.ModuleList([nn.Linear(1, 1) for _ in range(3)])
         self.color_transforms = nn.ModuleList([ct for _ in range(num_samples)])
@@ -86,8 +86,8 @@ class INR(nn.Module):
                 shift = self.shift_vectors[sample_id]
                 angle = self.rotation_angle[sample_id]
 
-                dy = shift[1]
                 dx = shift[0]
+                dy = shift[1]
 
                 # create affine transformation matrix
                 self.theta = torch.stack([
@@ -97,7 +97,7 @@ class INR(nn.Module):
 
                 x_reshaped = x[i].reshape(-1, 2)
                 x_reshaped = torch.cat([x_reshaped, torch.ones(x_reshaped.shape[0], 1, device=x.device)], dim=1)
-                x_reshaped = torch.matmul(x_reshaped, self.theta.T)
+                x_reshaped = torch.matmul(x_reshaped, self.theta.squeeze(-1).mT)
                 x[i] = x_reshaped.reshape(H, W, 2)  
 
                 dx_list.append(dx)
