@@ -1,12 +1,15 @@
-imageio==2.37.0
-matplotlib==3.10.0
-numpy==2.2.3
-torch==2.6.0
-tqdm==4.67.1
-opencv-python
-torchvision
-wandb
-pandas
-lpips
-torchmetrics
+torch>=2.0.0
+torchvision>=0.15.0
+torchmetrics>=0.11.0
+numpy>=1.20.0
+matplotlib>=3.5.0
+seaborn>=0.12.0
+tqdm>=4.65.0
+pandas>=1.5.0
+lpips>=0.1.4
+einops>=0.6.0
+wandb>=0.15.0
+pillow>=9.0.0
+scikit-image>=0.19.0
+scikit-learn>=1.0.0
 
