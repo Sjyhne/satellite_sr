@@ -192,5 +192,8 @@ test_burst/
 *.tar.lzma
 
 
-BurstSR/
-deep-rep/
+results*
+handheld/results*
+not_add/
+Synth*
+vizs/
