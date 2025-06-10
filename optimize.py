@@ -18,7 +18,7 @@ from input_projections.utils import get_input_projection
 from models.inr import INR
 
 
-def train_one_iteration(model, optimizer, train_sample, device):
+def train_one_iteration(model, optimizer, train_sample, device, downsample_factor):
     model.train()
     
     # Initialize loss functions
@@ -43,10 +43,10 @@ def train_one_iteration(model, optimizer, train_sample, device):
     optimizer.zero_grad()
 
     if model.use_gnll:
-        output, pred_shifts, pred_variance = model(input, sample_id, scale_factor=0.25, lr_frames=lr_target)
+        output, pred_shifts, pred_variance = model(input, sample_id, scale_factor=1/downsample_factor, lr_frames=lr_target)
         recon_loss = recon_criterion(output, lr_target, pred_variance)
     else:
-        output, pred_shifts = model(input, sample_id, scale_factor=0.25, lr_frames=lr_target)
+        output, pred_shifts = model(input, sample_id, scale_factor=1/downsample_factor, lr_frames=lr_target)
         recon_loss = recon_criterion(output, lr_target)
 
     pred_dx, pred_dy = pred_shifts
@@ -102,7 +102,7 @@ def main():
     # Model parameters
     parser.add_argument("--model", type=str, default="mlp", 
                        choices=["mlp", "siren", "wire", "linear", "conv", "thera"])
-    parser.add_argument("--network_depth", type=int, default=10)
+    parser.add_argument("--network_depth", type=int, default=4)
     parser.add_argument("--network_hidden_dim", type=int, default=256)
     parser.add_argument("--projection_dim", type=int, default=256)
     parser.add_argument("--input_projection", type=str, default="fourier_10", 
@@ -112,8 +112,8 @@ def main():
     
     # Training parameters
     parser.add_argument("--seed", type=int, default=10)
-    parser.add_argument("--iters", type=int, default=1000)
-    parser.add_argument("--learning_rate", type=float, default=5e-4)
+    parser.add_argument("--iters", type=int, default=2000)
+    parser.add_argument("--learning_rate", type=float, default=2e-3)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--device", type=str, default="0", help="CUDA device number")
     
@@ -163,7 +163,7 @@ def main():
                 break
                 
             # Train one iteration
-            train_losses = train_one_iteration(model, optimizer, train_sample, device)
+            train_losses = train_one_iteration(model, optimizer, train_sample, device, args.df)
             scheduler.step()
             iteration += 1
 
