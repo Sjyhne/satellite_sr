@@ -14,8 +14,7 @@ from torchmetrics.functional import structural_similarity_index_measure as ssim
 from torch.utils.data import DataLoader
 from data import get_dataset
 from utils import apply_shift_torch, bilinear_resize_torch, align_output_to_target, get_valid_mask
-from coordinate_based_mlp import FourierNetwork
-from losses import BasicLosses, AdvancedLosses, CharbonnierLoss, RelativeLosses, GradientDifferenceLoss, PerceptualLoss
+from losses import BasicLosses
 from viz_utils import (
     plot_training_curves, visualize_translations, create_model_comparison_grid,
     visualize_model_comparisons, visualize_per_sample_metrics, visualize_psnr_improvement_heatmap,
@@ -35,6 +34,7 @@ import pathlib
 import os
 import lpips
 import seaborn as sns
+from results_utils import aggregate_results
 
 def train_one_iteration(model, optimizer, train_sample, device, iteration=0, use_gt=False):
     model.train()
@@ -149,73 +149,6 @@ def calculate_metrics(pred, target):
         'ssim': ssim_value.item()
     }
 
-def aggregate_results(base_dir):
-    """
-    Aggregate results across all samples for each model type and configuration.
-    
-    Args:
-        base_dir: Path to the base results directory
-    
-    Returns:
-        DataFrame with aggregated results
-    """
-    results = []
-    
-    # Find all dataset directories
-    dataset_dirs = [d for d in base_dir.iterdir() if d.is_dir()]
-    
-    for dataset_dir in dataset_dirs:
-        # Find all experiment directories
-        experiment_dirs = [d for d in dataset_dir.iterdir() if d.is_dir()]
-        
-        for experiment_dir in experiment_dirs:
-            # Find all sample directories
-            sample_dirs = [d for d in experiment_dir.iterdir() if d.is_dir()]
-            
-            for sample_dir in sample_dirs:
-                # Find all model directories
-                model_dirs = [d for d in sample_dir.iterdir() if d.is_dir()]
-                
-                for model_dir in model_dirs:
-                    # Check if metrics.json exists
-                    metrics_file = model_dir / 'metrics.json'
-                    if metrics_file.exists():
-                        with open(metrics_file, 'r') as f:
-                            metrics = json.load(f)
-                        
-                        # Add sample and model info if not already in metrics
-                        if 'sample_id' not in metrics:
-                            metrics['sample_id'] = sample_dir.name
-                        metrics['dataset'] = dataset_dir.name
-                        metrics['experiment'] = experiment_dir.name
-                        
-                        # Parse model and projection from directory name if not already in metrics
-                        if 'model_type' not in metrics:
-                            model_parts = model_dir.name.split('_')
-                            metrics['model_type'] = model_parts[0]
-                            
-                            # Handle projection type
-                            if len(model_parts) >= 2:
-                                # For fourier, keep the scale as part of the projection name
-                                if "fourier" in model_parts[1]:
-                                    if len(model_parts) >= 3 and model_parts[2].replace('.', '', 1).isdigit():
-                                        metrics['projection_type'] = f"{model_parts[1]}_{model_parts[2]}"
-                                    else:
-                                        metrics['projection_type'] = model_parts[1]
-                                else:
-                                    metrics['projection_type'] = model_parts[1]
-                            else:
-                                metrics['projection_type'] = 'unknown'
-                        
-                        results.append(metrics)
-    
-    # Convert to DataFrame
-    if results:
-        df = pd.DataFrame(results)
-        return df
-    else:
-        return pd.DataFrame()
-
 def main():
     # Create argument parser
     parser = argparse.ArgumentParser(description="Satellite Super-Resolution Training")
@@ -262,7 +195,7 @@ def main():
                            help="Maximum degree of Legendre polynomial for the input projection")
     projection_group.add_argument("--activation", type=nn.Module, default=F.relu) 
                                   
-    # Training parameters
+    # Training parametersSS
     training_group = parser.add_argument_group('Training Parameters')
     training_group.add_argument("--seed", type=int, default=10, help="Random seed for reproducibility")
     training_group.add_argument("--iters", type=int, default=1000, help="Number of training iterations")

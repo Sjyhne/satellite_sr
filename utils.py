@@ -3,7 +3,6 @@ import torch.nn.functional as F
 import cv2
 import numpy as np
 from typing import Tuple
-from scipy.signal import correlate2d
 
 
 def apply_shift_cv2(image, dx, dy):
