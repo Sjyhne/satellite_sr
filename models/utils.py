@@ -40,6 +40,8 @@ def get_decoder(network_name, network_depth, input_dim, network_hidden_dim, outp
         return Conv(input_dim=input_dim, hidden_dim=network_hidden_dim, depth=network_depth, output_dim=output_dim)
     elif network_name == "thera":
         return Thera(input_dim=input_dim, hidden_dim=network_hidden_dim, depth=network_depth, output_dim=output_dim)
+    elif network_name == "nir":
+        return NIR(input_dim=input_dim, hidden_dim=network_hidden_dim, depth=network_depth, output_dim=output_dim)
     else:
         raise ValueError(f"Network name {network_name} not recognized")
 

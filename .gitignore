@@ -198,3 +198,8 @@ not_add/
 Synth*
 vizs/
 BurstSR/
+all_samples*
+inr_direct*
+inr_undirect*
+test/
+tci_super_resolved/
