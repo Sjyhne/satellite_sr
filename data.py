@@ -4,7 +4,7 @@ import numpy as np
 import cv2
 import json
 from pathlib import Path
-
+import random
 
 def get_and_standardize_image(image):
     """Get and standardize image to have zero mean and unit std for each channel"""
@@ -32,7 +32,7 @@ def get_and_standardize_image(image):
 def get_dataset(args, name='satburst', keep_in_memory=True):
     """ Returns the dataset object based on the name """
     if name == 'satburst_synth':
-        return SRData(data_dir=args.root_satburst_synth, num_samples=args.num_samples, keep_in_memory=keep_in_memory)
+        return SRData(data_dir=args.root_satburst_synth, num_samples=args.num_samples, keep_in_memory=keep_in_memory, scale_factor=args.scale_factor)
     elif name == 'burst_synth':
         return SyntheticBurstVal(data_dir=args.root_burst_synth, 
                                  sample_id=args.sample_id, keep_in_memory=keep_in_memory)
@@ -44,7 +44,7 @@ def get_dataset(args, name='satburst', keep_in_memory=True):
 
 
 class SRData(torch.utils.data.Dataset):
-    def __init__(self, data_dir, num_samples, keep_in_memory=True):
+    def __init__(self, data_dir, num_samples, keep_in_memory=True, scale_factor=4):
         """
         Initialize SR dataset from generated data directory.
         
@@ -82,7 +82,7 @@ class SRData(torch.utils.data.Dataset):
                     "mean": mean,
                     "std": std
                 }
-        
+
         # Load original image for reference
         self.original = cv2.imread(str(self.data_dir / "hr_ground_truth.png"))
         self.original = cv2.cvtColor(self.original, cv2.COLOR_BGR2RGB)
@@ -93,15 +93,29 @@ class SRData(torch.utils.data.Dataset):
         self.hr_coords = np.stack(np.meshgrid(self.hr_coords, self.hr_coords), -1)
         self.hr_coords = torch.FloatTensor(self.hr_coords).cuda()
 
+        self.lr_coords = np.linspace(0, 1, self.lr_image_sizes[0][0], endpoint=False)
+        self.lr_coords = np.stack(np.meshgrid(self.lr_coords, self.lr_coords), -1)
+        self.lr_coords = torch.FloatTensor(self.lr_coords).cuda()
+
+        self.scale_factor = [scale_factor]
+
     def __len__(self):
         return len(self.samples)
+    
+    def get_input_coordinates(self):
+        scale_factor = random.choice(self.scale_factor)
+
+        input_coordinates = np.linspace(0, 1, int(self.lr_image_sizes[0][0] * scale_factor), endpoint=False)
+        input_coordinates = np.stack(np.meshgrid(input_coordinates, input_coordinates), -1)
+        input_coordinates = torch.FloatTensor(input_coordinates).cuda()
+        return input_coordinates, scale_factor
     
     def __getitem__(self, idx):
         sample_name = self.samples[idx]
         sample_info = self.transform_log[sample_name]
         sample_id = int(sample_name.split("_")[-1])
 
-        input_coordinates = self.hr_coords
+        input_coordinates, scale_factor = self.get_input_coordinates()
 
         if self.keep_in_memory:
             img = self.images[sample_name]["image"]
@@ -118,6 +132,7 @@ class SRData(torch.utils.data.Dataset):
         return {
             'input': input_coordinates,
             'lr_target': img,
+            'scale_factor': scale_factor,
             'mean': mean,
             'std': std,
             'sample_id': sample_id,
